@@ -1,5 +1,6 @@
 const { Client, GatewayIntentBits, SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits, AuditLogEvent, ChannelType, Partials } = require('discord.js');
-const { Pool } = require('pg');
+const fs = require('fs');
+const path = require('path');
 
 // Créer un nouveau client Discord
 const client = new Client({
@@ -9,6 +10,7 @@ const client = new Client({
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildModeration,
     GatewayIntentBits.GuildVoiceStates,
+    GatewayIntentBits.GuildMembers,
   ],
   partials: [
     Partials.Message,
@@ -17,102 +19,71 @@ const client = new Client({
   ]
 });
 
-// Configuration PostgreSQL
-// Sur Railway, la variable DATABASE_URL est automatiquement fournie
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
-});
-
-// Stocker les canaux de logs pour chaque serveur (cache en mémoire)
+// Stocker les canaux de logs pour chaque serveur
 const logChannels = {
   messages: new Map(),
-  voice: new Map()
+  voice: new Map(),
+  roles: new Map(),
+  channels: new Map()
 };
 
 // Stocker les messages pour détecter qui les a supprimés
 const messageCache = new Map();
 
-// Initialiser la base de données
-async function initDatabase() {
-  try {
-    // Créer la table si elle n'existe pas
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS guild_config (
-        guild_id VARCHAR(255) PRIMARY KEY,
-        log_channel_messages VARCHAR(255),
-        log_channel_voice VARCHAR(255),
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-    
-    console.log('✅ Base de données initialisée');
-  } catch (error) {
-    console.error('❌ Erreur lors de l\'initialisation de la base de données:', error);
-  }
-}
+// Fichier de configuration
+const configPath = path.join(__dirname, 'config.json');
 
-// Charger la configuration depuis PostgreSQL
-async function loadConfig() {
+// Fonction pour charger la configuration
+function loadConfig() {
   try {
-    const result = await pool.query('SELECT * FROM guild_config');
-    
-    result.rows.forEach(row => {
-      if (row.log_channel_messages) {
-        logChannels.messages.set(row.guild_id, row.log_channel_messages);
+    if (fs.existsSync(configPath)) {
+      const data = fs.readFileSync(configPath, 'utf8');
+      const config = JSON.parse(data);
+      
+      // Charger les canaux de logs pour chaque type
+      if (config.logChannels?.messages) {
+        Object.entries(config.logChannels.messages).forEach(([guildId, channelId]) => {
+          logChannels.messages.set(guildId, channelId);
+        });
       }
-      if (row.log_channel_voice) {
-        logChannels.voice.set(row.guild_id, row.log_channel_voice);
+      if (config.logChannels?.voice) {
+        Object.entries(config.logChannels.voice).forEach(([guildId, channelId]) => {
+          logChannels.voice.set(guildId, channelId);
+        });
       }
-    });
-    
-    console.log('✅ Configuration chargée depuis PostgreSQL');
-    console.log(`📝 Serveurs avec logs messages: ${logChannels.messages.size}`);
-    console.log(`🎤 Serveurs avec logs vocaux: ${logChannels.voice.size}`);
+      if (config.logChannels?.roles) {
+        Object.entries(config.logChannels.roles).forEach(([guildId, channelId]) => {
+          logChannels.roles.set(guildId, channelId);
+        });
+      }
+      if (config.logChannels?.channels) {
+        Object.entries(config.logChannels.channels).forEach(([guildId, channelId]) => {
+          logChannels.channels.set(guildId, channelId);
+        });
+      }
+      
+      console.log('✅ Configuration chargée avec succès');
+      console.log(`📝 Messages: ${logChannels.messages.size} | 🎤 Vocaux: ${logChannels.voice.size} | 🎭 Rôles: ${logChannels.roles.size} | 📁 Salons: ${logChannels.channels.size}`);
+    }
   } catch (error) {
     console.error('❌ Erreur lors du chargement de la configuration:', error);
   }
 }
 
-// Sauvegarder la configuration dans PostgreSQL
-async function saveConfig(guildId, type, channelId) {
+// Fonction pour sauvegarder la configuration
+function saveConfig() {
   try {
-    // Vérifier si la guild existe déjà
-    const checkResult = await pool.query(
-      'SELECT * FROM guild_config WHERE guild_id = $1',
-      [guildId]
-    );
-    
-    if (checkResult.rows.length > 0) {
-      // Mettre à jour
-      if (type === 'messages') {
-        await pool.query(
-          'UPDATE guild_config SET log_channel_messages = $1, updated_at = CURRENT_TIMESTAMP WHERE guild_id = $2',
-          [channelId, guildId]
-        );
-      } else if (type === 'voice') {
-        await pool.query(
-          'UPDATE guild_config SET log_channel_voice = $1, updated_at = CURRENT_TIMESTAMP WHERE guild_id = $2',
-          [channelId, guildId]
-        );
+    const config = {
+      logChannels: {
+        messages: Object.fromEntries(logChannels.messages),
+        voice: Object.fromEntries(logChannels.voice),
+        roles: Object.fromEntries(logChannels.roles),
+        channels: Object.fromEntries(logChannels.channels)
       }
-    } else {
-      // Créer une nouvelle entrée
-      if (type === 'messages') {
-        await pool.query(
-          'INSERT INTO guild_config (guild_id, log_channel_messages) VALUES ($1, $2)',
-          [guildId, channelId]
-        );
-      } else if (type === 'voice') {
-        await pool.query(
-          'INSERT INTO guild_config (guild_id, log_channel_voice) VALUES ($1, $2)',
-          [guildId, channelId]
-        );
-      }
-    }
+    };
     
-    console.log(`✅ Configuration sauvegardée dans PostgreSQL (${type})`);
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf8');
+    console.log('✅ Configuration sauvegardée');
   } catch (error) {
     console.error('❌ Erreur lors de la sauvegarde de la configuration:', error);
   }
@@ -122,9 +93,8 @@ async function saveConfig(guildId, type, channelId) {
 client.once('clientReady', async () => {
   console.log(`✅ Bot connecté en tant que ${client.user.tag}`);
   
-  // Initialiser la base de données et charger la configuration
-  await initDatabase();
-  await loadConfig();
+  // Charger la configuration sauvegardée
+  loadConfig();
   
   // Enregistrer les commandes slash
   const commands = [
@@ -155,6 +125,30 @@ client.once('clientReady', async () => {
               .setRequired(true)
           )
       )
+      .addSubcommand(subcommand =>
+        subcommand
+          .setName('roles')
+          .setDescription('Configure les logs des modifications de rôles')
+          .addChannelOption(option =>
+            option
+              .setName('channel')
+              .setDescription('Le salon où envoyer les logs de rôles')
+              .addChannelTypes(ChannelType.GuildText)
+              .setRequired(true)
+          )
+      )
+      .addSubcommand(subcommand =>
+        subcommand
+          .setName('salons')
+          .setDescription('Configure les logs des créations/suppressions de salons')
+          .addChannelOption(option =>
+            option
+              .setName('channel')
+              .setDescription('Le salon où envoyer les logs de salons')
+              .addChannelTypes(ChannelType.GuildText)
+              .setRequired(true)
+          )
+      )
       .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
   ];
 
@@ -179,27 +173,37 @@ client.on('interactionCreate', async (interaction) => {
     const channel = interaction.options.getChannel('channel');
     
     if (subcommand === 'messages') {
-      // Sauvegarder le canal de logs messages pour ce serveur
       logChannels.messages.set(interaction.guildId, channel.id);
-      
-      // Sauvegarder dans PostgreSQL
-      await saveConfig(interaction.guildId, 'messages', channel.id);
-      
+      saveConfig();
       await interaction.reply({
-        content: `✅ Les logs de messages seront envoyés dans ${channel}\n💾 Configuration sauvegardée dans la base de données!`,
+        content: `✅ Les logs de messages seront envoyés dans ${channel}\n💾 Configuration sauvegardée!`,
         ephemeral: true
       });
     }
     
     if (subcommand === 'vocal') {
-      // Sauvegarder le canal de logs vocaux pour ce serveur
       logChannels.voice.set(interaction.guildId, channel.id);
-      
-      // Sauvegarder dans PostgreSQL
-      await saveConfig(interaction.guildId, 'voice', channel.id);
-      
+      saveConfig();
       await interaction.reply({
-        content: `✅ Les logs vocaux seront envoyés dans ${channel}\n💾 Configuration sauvegardée dans la base de données!`,
+        content: `✅ Les logs vocaux seront envoyés dans ${channel}\n💾 Configuration sauvegardée!`,
+        ephemeral: true
+      });
+    }
+    
+    if (subcommand === 'roles') {
+      logChannels.roles.set(interaction.guildId, channel.id);
+      saveConfig();
+      await interaction.reply({
+        content: `✅ Les logs de rôles seront envoyés dans ${channel}\n💾 Configuration sauvegardée!`,
+        ephemeral: true
+      });
+    }
+    
+    if (subcommand === 'salons') {
+      logChannels.channels.set(interaction.guildId, channel.id);
+      saveConfig();
+      await interaction.reply({
+        content: `✅ Les logs de salons seront envoyés dans ${channel}\n💾 Configuration sauvegardée!`,
         ephemeral: true
       });
     }
@@ -416,53 +420,239 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     
     await logChannel.send({ embeds: [embed] });
   }
+});
+
+// Logger les modifications de rôles
+client.on('guildMemberUpdate', async (oldMember, newMember) => {
+  const logChannelId = logChannels.roles.get(newMember.guild.id);
+  if (!logChannelId) return;
   
-  // Changements d'état (mute, deafen, stream, vidéo)
-  else if (oldState.channel && newState.channel && oldState.channel.id === newState.channel.id) {
-    const changes = [];
+  const logChannel = newMember.guild.channels.cache.get(logChannelId);
+  if (!logChannel) return;
+  
+  // Vérifier les changements de rôles
+  const oldRoles = oldMember.roles.cache;
+  const newRoles = newMember.roles.cache;
+  
+  const addedRoles = newRoles.filter(role => !oldRoles.has(role.id));
+  const removedRoles = oldRoles.filter(role => !newRoles.has(role.id));
+  
+  if (addedRoles.size === 0 && removedRoles.size === 0) return;
+  
+  // Chercher qui a fait la modification
+  let executor = null;
+  try {
+    const auditLogs = await newMember.guild.fetchAuditLogs({
+      type: AuditLogEvent.MemberRoleUpdate,
+      limit: 1
+    });
     
-    // Mute/Unmute
-    if (oldState.selfMute !== newState.selfMute) {
-      changes.push(`${newState.selfMute ? '🔇 S\'est mis en muet' : '🔊 A activé son micro'}`);
+    const roleLog = auditLogs.entries.first();
+    if (roleLog && roleLog.target.id === newMember.id && 
+        roleLog.createdTimestamp > Date.now() - 5000) {
+      executor = roleLog.executor;
     }
-    if (oldState.serverMute !== newState.serverMute) {
-      changes.push(`${newState.serverMute ? '🔇 A été mis en muet par le serveur' : '🔊 N\'est plus muet par le serveur'}`);
-    }
-    
-    // Deafen/Undeafen
-    if (oldState.selfDeaf !== newState.selfDeaf) {
-      changes.push(`${newState.selfDeaf ? '🔇 S\'est sourdine' : '🔊 A activé son audio'}`);
-    }
-    if (oldState.serverDeaf !== newState.serverDeaf) {
-      changes.push(`${newState.serverDeaf ? '🔇 A été sourdine par le serveur' : '🔊 N\'est plus sourdine par le serveur'}`);
-    }
-    
-    // Stream
-    if (oldState.streaming !== newState.streaming) {
-      changes.push(`${newState.streaming ? '📡 A commencé à streamer' : '📡 A arrêté de streamer'}`);
-    }
-    
-    // Vidéo
-    if (oldState.selfVideo !== newState.selfVideo) {
-      changes.push(`${newState.selfVideo ? '📹 A activé sa caméra' : '📹 A désactivé sa caméra'}`);
-    }
-    
-    if (changes.length > 0) {
-      const embed = new EmbedBuilder()
-        .setTitle('⚙️ Changement d\'état vocal')
-        .setColor('#00BFFF')
-        .addFields(
-          { name: '👤 Utilisateur', value: `${member.user} (${member.user.id})`, inline: true },
-          { name: '🔊 Salon', value: `${newState.channel}`, inline: true },
-          { name: '🔄 Changements', value: changes.join('\n'), inline: false },
-          { name: '📅 Date', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: false }
-        )
-        .setThumbnail(member.user.displayAvatarURL())
-        .setTimestamp();
-      
-      await logChannel.send({ embeds: [embed] });
-    }
+  } catch (error) {
+    console.error('Erreur lors de la récupération des logs d\'audit:', error);
   }
+  
+  const embed = new EmbedBuilder()
+    .setTitle('🎭 Modification de rôles')
+    .setColor('#9B59B6')
+    .addFields(
+      { name: '👤 Membre', value: `${newMember.user} (${newMember.user.id})`, inline: true },
+      { name: '📅 Date', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: true }
+    )
+    .setThumbnail(newMember.user.displayAvatarURL())
+    .setTimestamp();
+  
+  if (addedRoles.size > 0) {
+    embed.addFields({ 
+      name: '✅ Rôles ajoutés', 
+      value: addedRoles.map(role => role.toString()).join(', ') 
+    });
+  }
+  
+  if (removedRoles.size > 0) {
+    embed.addFields({ 
+      name: '❌ Rôles retirés', 
+      value: removedRoles.map(role => role.toString()).join(', ') 
+    });
+  }
+  
+  if (executor) {
+    embed.addFields({ name: '⚙️ Modifié par', value: `${executor} (${executor.id})` });
+  }
+  
+  await logChannel.send({ embeds: [embed] });
+});
+
+// Logger la création de salons
+client.on('channelCreate', async (channel) => {
+  if (!channel.guild) return;
+  
+  const logChannelId = logChannels.channels.get(channel.guild.id);
+  if (!logChannelId) return;
+  
+  const logChannel = channel.guild.channels.cache.get(logChannelId);
+  if (!logChannel) return;
+  
+  // Chercher qui a créé le salon
+  let executor = null;
+  try {
+    const auditLogs = await channel.guild.fetchAuditLogs({
+      type: AuditLogEvent.ChannelCreate,
+      limit: 1
+    });
+    
+    const createLog = auditLogs.entries.first();
+    if (createLog && createLog.target.id === channel.id) {
+      executor = createLog.executor;
+    }
+  } catch (error) {
+    console.error('Erreur lors de la récupération des logs d\'audit:', error);
+  }
+  
+  const channelTypes = {
+    0: '💬 Textuel',
+    2: '🔊 Vocal',
+    4: '📁 Catégorie',
+    5: '📢 Annonces',
+    13: '🎙️ Stage',
+    15: '🧵 Forum'
+  };
+  
+  const embed = new EmbedBuilder()
+    .setTitle('📁 Salon créé')
+    .setColor('#00FF00')
+    .addFields(
+      { name: '📝 Nom', value: channel.name, inline: true },
+      { name: '🆔 ID', value: channel.id, inline: true },
+      { name: '📋 Type', value: channelTypes[channel.type] || 'Inconnu', inline: true },
+      { name: '📅 Date', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: false }
+    )
+    .setTimestamp();
+  
+  if (executor) {
+    embed.addFields({ name: '👤 Créé par', value: `${executor} (${executor.id})` });
+  }
+  
+  await logChannel.send({ embeds: [embed] });
+});
+
+// Logger la suppression de salons
+client.on('channelDelete', async (channel) => {
+  if (!channel.guild) return;
+  
+  const logChannelId = logChannels.channels.get(channel.guild.id);
+  if (!logChannelId) return;
+  
+  const logChannel = channel.guild.channels.cache.get(logChannelId);
+  if (!logChannel) return;
+  
+  // Chercher qui a supprimé le salon
+  let executor = null;
+  try {
+    const auditLogs = await channel.guild.fetchAuditLogs({
+      type: AuditLogEvent.ChannelDelete,
+      limit: 1
+    });
+    
+    const deleteLog = auditLogs.entries.first();
+    if (deleteLog && deleteLog.target.id === channel.id) {
+      executor = deleteLog.executor;
+    }
+  } catch (error) {
+    console.error('Erreur lors de la récupération des logs d\'audit:', error);
+  }
+  
+  const channelTypes = {
+    0: '💬 Textuel',
+    2: '🔊 Vocal',
+    4: '📁 Catégorie',
+    5: '📢 Annonces',
+    13: '🎙️ Stage',
+    15: '🧵 Forum'
+  };
+  
+  const embed = new EmbedBuilder()
+    .setTitle('🗑️ Salon supprimé')
+    .setColor('#FF0000')
+    .addFields(
+      { name: '📝 Nom', value: channel.name, inline: true },
+      { name: '🆔 ID', value: channel.id, inline: true },
+      { name: '📋 Type', value: channelTypes[channel.type] || 'Inconnu', inline: true },
+      { name: '📅 Date', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: false }
+    )
+    .setTimestamp();
+  
+  if (executor) {
+    embed.addFields({ name: '👤 Supprimé par', value: `${executor} (${executor.id})` });
+  }
+  
+  await logChannel.send({ embeds: [embed] });
+});
+
+// Logger la modification de salons
+client.on('channelUpdate', async (oldChannel, newChannel) => {
+  if (!newChannel.guild) return;
+  
+  const logChannelId = logChannels.channels.get(newChannel.guild.id);
+  if (!logChannelId) return;
+  
+  const logChannel = newChannel.guild.channels.cache.get(logChannelId);
+  if (!logChannel) return;
+  
+  const changes = [];
+  
+  // Vérifier les changements
+  if (oldChannel.name !== newChannel.name) {
+    changes.push(`**Nom:** ${oldChannel.name} → ${newChannel.name}`);
+  }
+  
+  if (oldChannel.topic !== newChannel.topic) {
+    changes.push(`**Sujet:** ${oldChannel.topic || 'Aucun'} → ${newChannel.topic || 'Aucun'}`);
+  }
+  
+  if (oldChannel.nsfw !== newChannel.nsfw) {
+    changes.push(`**NSFW:** ${oldChannel.nsfw ? 'Oui' : 'Non'} → ${newChannel.nsfw ? 'Oui' : 'Non'}`);
+  }
+  
+  if (changes.length === 0) return;
+  
+  // Chercher qui a modifié le salon
+  let executor = null;
+  try {
+    const auditLogs = await newChannel.guild.fetchAuditLogs({
+      type: AuditLogEvent.ChannelUpdate,
+      limit: 1
+    });
+    
+    const updateLog = auditLogs.entries.first();
+    if (updateLog && updateLog.target.id === newChannel.id && 
+        updateLog.createdTimestamp > Date.now() - 5000) {
+      executor = updateLog.executor;
+    }
+  } catch (error) {
+    console.error('Erreur lors de la récupération des logs d\'audit:', error);
+  }
+  
+  const embed = new EmbedBuilder()
+    .setTitle('✏️ Salon modifié')
+    .setColor('#FFA500')
+    .addFields(
+      { name: '📝 Salon', value: `${newChannel}`, inline: true },
+      { name: '🆔 ID', value: newChannel.id, inline: true },
+      { name: '🔄 Modifications', value: changes.join('\n'), inline: false },
+      { name: '📅 Date', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: false }
+    )
+    .setTimestamp();
+  
+  if (executor) {
+    embed.addFields({ name: '👤 Modifié par', value: `${executor} (${executor.id})` });
+  }
+  
+  await logChannel.send({ embeds: [embed] });
 });
 
 // Connexion du bot avec votre token
