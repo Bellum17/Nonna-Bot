@@ -1,4 +1,6 @@
 const { Client, GatewayIntentBits, SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits, AuditLogEvent, ChannelType, Partials } = require('discord.js');
+const fs = require('fs');
+const path = require('path');
 
 // Créer un nouveau client Discord
 const client = new Client({
@@ -21,9 +23,50 @@ const logChannels = new Map();
 // Stocker les messages pour détecter qui les a supprimés
 const messageCache = new Map();
 
+// Fichier de configuration
+const configPath = path.join(__dirname, 'config.json');
+
+// Fonction pour charger la configuration
+function loadConfig() {
+  try {
+    if (fs.existsSync(configPath)) {
+      const data = fs.readFileSync(configPath, 'utf8');
+      const config = JSON.parse(data);
+      
+      // Charger les canaux de logs
+      if (config.logChannels) {
+        Object.entries(config.logChannels).forEach(([guildId, channelId]) => {
+          logChannels.set(guildId, channelId);
+        });
+      }
+      
+      console.log('✅ Configuration chargée avec succès');
+    }
+  } catch (error) {
+    console.error('❌ Erreur lors du chargement de la configuration:', error);
+  }
+}
+
+// Fonction pour sauvegarder la configuration
+function saveConfig() {
+  try {
+    const config = {
+      logChannels: Object.fromEntries(logChannels)
+    };
+    
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf8');
+    console.log('✅ Configuration sauvegardée');
+  } catch (error) {
+    console.error('❌ Erreur lors de la sauvegarde de la configuration:', error);
+  }
+}
+
 // Événement quand le bot est prêt
 client.once('clientReady', async () => {
   console.log(`✅ Bot connecté en tant que ${client.user.tag}`);
+  
+  // Charger la configuration sauvegardée
+  loadConfig();
   
   // Enregistrer les commandes slash
   const commands = [
@@ -68,8 +111,11 @@ client.on('interactionCreate', async (interaction) => {
       // Sauvegarder le canal de logs pour ce serveur
       logChannels.set(interaction.guildId, channel.id);
       
+      // Sauvegarder dans le fichier de configuration
+      saveConfig();
+      
       await interaction.reply({
-        content: `✅ Les logs de messages seront envoyés dans ${channel}`,
+        content: `✅ Les logs de messages seront envoyés dans ${channel}\n💾 Configuration sauvegardée!`,
         ephemeral: true
       });
     }
