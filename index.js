@@ -1,6 +1,5 @@
 const { Client, GatewayIntentBits, SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits, AuditLogEvent, ChannelType, Partials } = require('discord.js');
-const fs = require('fs');
-const path = require('path');
+const { Pool } = require('pg');
 
 // Créer un nouveau client Discord
 const client = new Client({
@@ -19,7 +18,26 @@ const client = new Client({
   ]
 });
 
-// Stocker les canaux de logs pour chaque serveur
+// Configuration PostgreSQL
+let pool = null;
+let useDatabase = false;
+
+// Initialiser PostgreSQL si DATABASE_URL existe
+if (process.env.DATABASE_URL) {
+  try {
+    pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: { rejectUnauthorized: false }
+    });
+    useDatabase = true;
+    console.log('🗄️  PostgreSQL activé');
+  } catch (error) {
+    console.error('❌ Erreur PostgreSQL:', error.message);
+    useDatabase = false;
+  }
+}
+
+// Stocker les canaux de logs pour chaque serveur (cache en mémoire)
 const logChannels = {
   messages: new Map(),
   voice: new Map(),
@@ -30,62 +48,108 @@ const logChannels = {
 // Stocker les messages pour détecter qui les a supprimés
 const messageCache = new Map();
 
-// Fichier de configuration
-const configPath = path.join(__dirname, 'config.json');
+// Initialiser la base de données PostgreSQL
+async function initDatabase() {
+  if (!useDatabase || !pool) {
+    console.log('⚠️  Mode sans base de données - Configuration non persistante');
+    return;
+  }
 
-// Fonction pour charger la configuration
-function loadConfig() {
   try {
-    if (fs.existsSync(configPath)) {
-      const data = fs.readFileSync(configPath, 'utf8');
-      const config = JSON.parse(data);
-      
-      // Charger les canaux de logs pour chaque type
-      if (config.logChannels?.messages) {
-        Object.entries(config.logChannels.messages).forEach(([guildId, channelId]) => {
-          logChannels.messages.set(guildId, channelId);
-        });
-      }
-      if (config.logChannels?.voice) {
-        Object.entries(config.logChannels.voice).forEach(([guildId, channelId]) => {
-          logChannels.voice.set(guildId, channelId);
-        });
-      }
-      if (config.logChannels?.roles) {
-        Object.entries(config.logChannels.roles).forEach(([guildId, channelId]) => {
-          logChannels.roles.set(guildId, channelId);
-        });
-      }
-      if (config.logChannels?.channels) {
-        Object.entries(config.logChannels.channels).forEach(([guildId, channelId]) => {
-          logChannels.channels.set(guildId, channelId);
-        });
-      }
-      
-      console.log('✅ Configuration chargée avec succès');
-      console.log(`📝 Messages: ${logChannels.messages.size} | 🎤 Vocaux: ${logChannels.voice.size} | 🎭 Rôles: ${logChannels.roles.size} | 📁 Salons: ${logChannels.channels.size}`);
-    }
+    // Test de connexion
+    await pool.query('SELECT NOW()');
+    console.log('✅ Connexion PostgreSQL réussie');
+
+    // Créer la table de configuration des logs
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS log_config (
+        guild_id VARCHAR(50) PRIMARY KEY,
+        log_messages VARCHAR(50),
+        log_voice VARCHAR(50),
+        log_roles VARCHAR(50),
+        log_channels VARCHAR(50),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    console.log('✅ Table log_config créée/vérifiée');
   } catch (error) {
-    console.error('❌ Erreur lors du chargement de la configuration:', error);
+    console.error('❌ Erreur initialisation base de données:', error.message);
+    useDatabase = false;
   }
 }
 
-// Fonction pour sauvegarder la configuration
-function saveConfig() {
+// Charger la configuration depuis PostgreSQL
+async function loadConfig() {
+  if (!useDatabase || !pool) {
+    console.log('ℹ️  Aucune base de données - Configuration temporaire');
+    return;
+  }
+
   try {
-    const config = {
-      logChannels: {
-        messages: Object.fromEntries(logChannels.messages),
-        voice: Object.fromEntries(logChannels.voice),
-        roles: Object.fromEntries(logChannels.roles),
-        channels: Object.fromEntries(logChannels.channels)
-      }
-    };
+    const result = await pool.query('SELECT * FROM log_config');
     
-    fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf8');
-    console.log('✅ Configuration sauvegardée');
+    let count = 0;
+    result.rows.forEach(row => {
+      if (row.log_messages) {
+        logChannels.messages.set(row.guild_id, row.log_messages);
+        count++;
+      }
+      if (row.log_voice) {
+        logChannels.voice.set(row.guild_id, row.log_voice);
+        count++;
+      }
+      if (row.log_roles) {
+        logChannels.roles.set(row.guild_id, row.log_roles);
+        count++;
+      }
+      if (row.log_channels) {
+        logChannels.channels.set(row.guild_id, row.log_channels);
+        count++;
+      }
+    });
+
+    console.log(`✅ Configuration chargée: ${count} logs configurés sur ${result.rows.length} serveurs`);
+    console.log(`📝 Messages: ${logChannels.messages.size} | 🎤 Vocaux: ${logChannels.voice.size} | 🎭 Rôles: ${logChannels.roles.size} | 📁 Salons: ${logChannels.channels.size}`);
   } catch (error) {
-    console.error('❌ Erreur lors de la sauvegarde de la configuration:', error);
+    console.error('❌ Erreur chargement config:', error.message);
+  }
+}
+
+// Sauvegarder la configuration dans PostgreSQL
+async function saveConfig(guildId, logType, channelId) {
+  if (!useDatabase || !pool) {
+    console.log('⚠️  Pas de base de données - Configuration non sauvegardée');
+    return;
+  }
+
+  try {
+    // Vérifier si la guild existe
+    const checkResult = await pool.query(
+      'SELECT * FROM log_config WHERE guild_id = $1',
+      [guildId]
+    );
+
+    const columnName = `log_${logType}`;
+    
+    if (checkResult.rows.length > 0) {
+      // Mise à jour
+      await pool.query(
+        `UPDATE log_config SET ${columnName} = $1, updated_at = CURRENT_TIMESTAMP WHERE guild_id = $2`,
+        [channelId, guildId]
+      );
+      console.log(`✅ Config mise à jour: ${logType} pour serveur ${guildId}`);
+    } else {
+      // Insertion
+      await pool.query(
+        `INSERT INTO log_config (guild_id, ${columnName}) VALUES ($1, $2)`,
+        [guildId, channelId]
+      );
+      console.log(`✅ Config créée: ${logType} pour serveur ${guildId}`);
+    }
+  } catch (error) {
+    console.error('❌ Erreur sauvegarde config:', error.message);
   }
 }
 
@@ -93,8 +157,9 @@ function saveConfig() {
 client.once('clientReady', async () => {
   console.log(`✅ Bot connecté en tant que ${client.user.tag}`);
   
-  // Charger la configuration sauvegardée
-  loadConfig();
+  // Initialiser et charger la configuration
+  await initDatabase();
+  await loadConfig();
   
   // Enregistrer les commandes slash
   const commands = [
@@ -174,36 +239,36 @@ client.on('interactionCreate', async (interaction) => {
     
     if (subcommand === 'messages') {
       logChannels.messages.set(interaction.guildId, channel.id);
-      saveConfig();
+      await saveConfig(interaction.guildId, 'messages', channel.id);
       await interaction.reply({
-        content: `✅ Les logs de messages seront envoyés dans ${channel}\n💾 Configuration sauvegardée!`,
+        content: `✅ Les logs de messages seront envoyés dans ${channel}\n💾 Configuration ${useDatabase ? 'sauvegardée en base de données' : 'temporaire (pas de BDD)'}!`,
         ephemeral: true
       });
     }
     
     if (subcommand === 'vocal') {
       logChannels.voice.set(interaction.guildId, channel.id);
-      saveConfig();
+      await saveConfig(interaction.guildId, 'voice', channel.id);
       await interaction.reply({
-        content: `✅ Les logs vocaux seront envoyés dans ${channel}\n💾 Configuration sauvegardée!`,
+        content: `✅ Les logs vocaux seront envoyés dans ${channel}\n💾 Configuration ${useDatabase ? 'sauvegardée en base de données' : 'temporaire (pas de BDD)'}!`,
         ephemeral: true
       });
     }
     
     if (subcommand === 'roles') {
       logChannels.roles.set(interaction.guildId, channel.id);
-      saveConfig();
+      await saveConfig(interaction.guildId, 'roles', channel.id);
       await interaction.reply({
-        content: `✅ Les logs de rôles seront envoyés dans ${channel}\n💾 Configuration sauvegardée!`,
+        content: `✅ Les logs de rôles seront envoyés dans ${channel}\n💾 Configuration ${useDatabase ? 'sauvegardée en base de données' : 'temporaire (pas de BDD)'}!`,
         ephemeral: true
       });
     }
     
     if (subcommand === 'salons') {
       logChannels.channels.set(interaction.guildId, channel.id);
-      saveConfig();
+      await saveConfig(interaction.guildId, 'channels', channel.id);
       await interaction.reply({
-        content: `✅ Les logs de salons seront envoyés dans ${channel}\n💾 Configuration sauvegardée!`,
+        content: `✅ Les logs de salons seront envoyés dans ${channel}\n💾 Configuration ${useDatabase ? 'sauvegardée en base de données' : 'temporaire (pas de BDD)'}!`,
         ephemeral: true
       });
     }
@@ -487,6 +552,220 @@ client.on('guildMemberUpdate', async (oldMember, newMember) => {
   await logChannel.send({ embeds: [embed] });
 });
 
+// Logger la création de rôles
+client.on('roleCreate', async (role) => {
+  const logChannelId = logChannels.roles.get(role.guild.id);
+  if (!logChannelId) return;
+  
+  const logChannel = role.guild.channels.cache.get(logChannelId);
+  if (!logChannel) return;
+  
+  // Chercher qui a créé le rôle
+  let executor = null;
+  try {
+    const auditLogs = await role.guild.fetchAuditLogs({
+      type: AuditLogEvent.RoleCreate,
+      limit: 1
+    });
+    
+    const createLog = auditLogs.entries.first();
+    if (createLog && createLog.target.id === role.id) {
+      executor = createLog.executor;
+    }
+  } catch (error) {
+    console.error('Erreur lors de la récupération des logs d\'audit:', error);
+  }
+  
+  const embed = new EmbedBuilder()
+    .setTitle('🎭 Rôle créé')
+    .setColor(role.color || '#99AAB5')
+    .addFields(
+      { name: '📝 Nom', value: role.name, inline: true },
+      { name: '🆔 ID', value: role.id, inline: true },
+      { name: '🎨 Couleur', value: role.hexColor, inline: true },
+      { name: '📊 Position', value: role.position.toString(), inline: true },
+      { name: '🏷️ Mentionnable', value: role.mentionable ? '✅' : '❌', inline: true },
+      { name: '👁️ Affiché séparément', value: role.hoist ? '✅' : '❌', inline: true }
+    )
+    .setTimestamp();
+  
+  // Permissions importantes
+  const importantPerms = [];
+  if (role.permissions.has('Administrator')) importantPerms.push('👑 Administrateur');
+  if (role.permissions.has('ManageGuild')) importantPerms.push('⚙️ Gérer le serveur');
+  if (role.permissions.has('ManageRoles')) importantPerms.push('🎭 Gérer les rôles');
+  if (role.permissions.has('ManageChannels')) importantPerms.push('📁 Gérer les salons');
+  if (role.permissions.has('KickMembers')) importantPerms.push('👢 Expulser des membres');
+  if (role.permissions.has('BanMembers')) importantPerms.push('🔨 Bannir des membres');
+  if (role.permissions.has('ManageMessages')) importantPerms.push('🗑️ Gérer les messages');
+  if (role.permissions.has('MentionEveryone')) importantPerms.push('📢 Mentionner @everyone');
+  
+  if (importantPerms.length > 0) {
+    embed.addFields({ name: '🔐 Permissions importantes', value: importantPerms.join('\n') });
+  }
+  
+  if (executor) {
+    embed.addFields({ name: '👤 Créé par', value: `${executor} (${executor.id})` });
+  }
+  
+  embed.addFields({ name: '📅 Date', value: `<t:${Math.floor(Date.now() / 1000)}:F>` });
+  
+  await logChannel.send({ embeds: [embed] });
+});
+
+// Logger la suppression de rôles
+client.on('roleDelete', async (role) => {
+  const logChannelId = logChannels.roles.get(role.guild.id);
+  if (!logChannelId) return;
+  
+  const logChannel = role.guild.channels.cache.get(logChannelId);
+  if (!logChannel) return;
+  
+  // Chercher qui a supprimé le rôle
+  let executor = null;
+  try {
+    const auditLogs = await role.guild.fetchAuditLogs({
+      type: AuditLogEvent.RoleDelete,
+      limit: 1
+    });
+    
+    const deleteLog = auditLogs.entries.first();
+    if (deleteLog && deleteLog.target.id === role.id) {
+      executor = deleteLog.executor;
+    }
+  } catch (error) {
+    console.error('Erreur lors de la récupération des logs d\'audit:', error);
+  }
+  
+  const embed = new EmbedBuilder()
+    .setTitle('🗑️ Rôle supprimé')
+    .setColor('#FF0000')
+    .addFields(
+      { name: '📝 Nom', value: role.name, inline: true },
+      { name: '🆔 ID', value: role.id, inline: true },
+      { name: '🎨 Couleur', value: role.hexColor, inline: true },
+      { name: '📊 Position', value: role.position.toString(), inline: true },
+      { name: '👥 Membres', value: role.members.size.toString(), inline: true }
+    )
+    .setTimestamp();
+  
+  if (executor) {
+    embed.addFields({ name: '👤 Supprimé par', value: `${executor} (${executor.id})` });
+  }
+  
+  embed.addFields({ name: '📅 Date', value: `<t:${Math.floor(Date.now() / 1000)}:F>` });
+  
+  await logChannel.send({ embeds: [embed] });
+});
+
+// Logger la modification de rôles
+client.on('roleUpdate', async (oldRole, newRole) => {
+  const logChannelId = logChannels.roles.get(newRole.guild.id);
+  if (!logChannelId) return;
+  
+  const logChannel = newRole.guild.channels.cache.get(logChannelId);
+  if (!logChannel) return;
+  
+  const changes = [];
+  
+  // Vérifier les changements
+  if (oldRole.name !== newRole.name) {
+    changes.push(`**📝 Nom:** ${oldRole.name} → ${newRole.name}`);
+  }
+  
+  if (oldRole.color !== newRole.color) {
+    changes.push(`**🎨 Couleur:** ${oldRole.hexColor} → ${newRole.hexColor}`);
+  }
+  
+  if (oldRole.hoist !== newRole.hoist) {
+    changes.push(`**👁️ Affiché séparément:** ${oldRole.hoist ? 'Oui' : 'Non'} → ${newRole.hoist ? 'Oui' : 'Non'}`);
+  }
+  
+  if (oldRole.mentionable !== newRole.mentionable) {
+    changes.push(`**🏷️ Mentionnable:** ${oldRole.mentionable ? 'Oui' : 'Non'} → ${newRole.mentionable ? 'Oui' : 'Non'}`);
+  }
+  
+  if (oldRole.position !== newRole.position) {
+    changes.push(`**📊 Position:** ${oldRole.position} → ${newRole.position}`);
+  }
+  
+  // Vérifier les changements de permissions
+  const addedPerms = newRole.permissions.missing(oldRole.permissions);
+  const removedPerms = oldRole.permissions.missing(newRole.permissions);
+  
+  const permissionNames = {
+    'Administrator': '👑 Administrateur',
+    'ManageGuild': '⚙️ Gérer le serveur',
+    'ManageRoles': '🎭 Gérer les rôles',
+    'ManageChannels': '📁 Gérer les salons',
+    'KickMembers': '👢 Expulser',
+    'BanMembers': '🔨 Bannir',
+    'ManageMessages': '🗑️ Gérer les messages',
+    'MentionEveryone': '📢 Mention @everyone',
+    'ViewAuditLog': '📋 Voir les logs',
+    'ManageWebhooks': '🔗 Gérer les webhooks',
+    'ManageEmojisAndStickers': '😀 Gérer emojis',
+    'ViewChannel': '👁️ Voir le salon',
+    'SendMessages': '💬 Envoyer des messages',
+    'EmbedLinks': '🔗 Intégrer des liens',
+    'AttachFiles': '📎 Joindre des fichiers',
+    'AddReactions': '😊 Ajouter des réactions',
+    'UseExternalEmojis': '😀 Emojis externes',
+    'Connect': '🔊 Se connecter (vocal)',
+    'Speak': '🎤 Parler',
+    'MuteMembers': '🔇 Rendre muet',
+    'DeafenMembers': '🔇 Mettre en sourdine',
+    'MoveMembers': '↔️ Déplacer des membres'
+  };
+  
+  if (addedPerms.length > 0) {
+    const perms = addedPerms.map(p => permissionNames[p] || p).join(', ');
+    changes.push(`**✅ Permissions ajoutées:** ${perms}`);
+  }
+  
+  if (removedPerms.length > 0) {
+    const perms = removedPerms.map(p => permissionNames[p] || p).join(', ');
+    changes.push(`**❌ Permissions retirées:** ${perms}`);
+  }
+  
+  if (changes.length === 0) return;
+  
+  // Chercher qui a modifié le rôle
+  let executor = null;
+  try {
+    const auditLogs = await newRole.guild.fetchAuditLogs({
+      type: AuditLogEvent.RoleUpdate,
+      limit: 1
+    });
+    
+    const updateLog = auditLogs.entries.first();
+    if (updateLog && updateLog.target.id === newRole.id && 
+        updateLog.createdTimestamp > Date.now() - 5000) {
+      executor = updateLog.executor;
+    }
+  } catch (error) {
+    console.error('Erreur lors de la récupération des logs d\'audit:', error);
+  }
+  
+  const embed = new EmbedBuilder()
+    .setTitle('✏️ Rôle modifié')
+    .setColor(newRole.color || '#FFA500')
+    .addFields(
+      { name: '🎭 Rôle', value: `${newRole}`, inline: true },
+      { name: '🆔 ID', value: newRole.id, inline: true },
+      { name: '🔄 Modifications', value: changes.join('\n').substring(0, 1024), inline: false }
+    )
+    .setTimestamp();
+  
+  if (executor) {
+    embed.addFields({ name: '👤 Modifié par', value: `${executor} (${executor.id})` });
+  }
+  
+  embed.addFields({ name: '📅 Date', value: `<t:${Math.floor(Date.now() / 1000)}:F>` });
+  
+  await logChannel.send({ embeds: [embed] });
+});
+
 // Logger la création de salons
 client.on('channelCreate', async (channel) => {
   if (!channel.guild) return;
@@ -528,14 +807,35 @@ client.on('channelCreate', async (channel) => {
     .addFields(
       { name: '📝 Nom', value: channel.name, inline: true },
       { name: '🆔 ID', value: channel.id, inline: true },
-      { name: '📋 Type', value: channelTypes[channel.type] || 'Inconnu', inline: true },
-      { name: '📅 Date', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: false }
+      { name: '📋 Type', value: channelTypes[channel.type] || 'Inconnu', inline: true }
     )
     .setTimestamp();
+  
+  // Ajouter des détails selon le type
+  if (channel.type === 0) { // Textuel
+    if (channel.topic) embed.addFields({ name: '� Sujet', value: channel.topic.substring(0, 1024) });
+    embed.addFields({ 
+      name: '⚙️ Paramètres', 
+      value: `NSFW: ${channel.nsfw ? '✅' : '❌'}\nRalenti: ${channel.rateLimitPerUser}s` 
+    });
+  }
+  
+  if (channel.type === 2) { // Vocal
+    embed.addFields({ 
+      name: '⚙️ Paramètres', 
+      value: `Limite utilisateurs: ${channel.userLimit || 'Illimité'}\nQualité audio: ${channel.bitrate / 1000}kbps` 
+    });
+  }
+  
+  if (channel.parent) {
+    embed.addFields({ name: '📁 Catégorie', value: channel.parent.name });
+  }
   
   if (executor) {
     embed.addFields({ name: '👤 Créé par', value: `${executor} (${executor.id})` });
   }
+  
+  embed.addFields({ name: '📅 Date', value: `<t:${Math.floor(Date.now() / 1000)}:F>` });
   
   await logChannel.send({ embeds: [embed] });
 });
@@ -581,14 +881,24 @@ client.on('channelDelete', async (channel) => {
     .addFields(
       { name: '📝 Nom', value: channel.name, inline: true },
       { name: '🆔 ID', value: channel.id, inline: true },
-      { name: '📋 Type', value: channelTypes[channel.type] || 'Inconnu', inline: true },
-      { name: '📅 Date', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: false }
+      { name: '📋 Type', value: channelTypes[channel.type] || 'Inconnu', inline: true }
     )
     .setTimestamp();
+  
+  // Ajouter des détails selon le type
+  if (channel.type === 0 && channel.topic) {
+    embed.addFields({ name: '� Sujet', value: channel.topic.substring(0, 1024) });
+  }
+  
+  if (channel.parent) {
+    embed.addFields({ name: '📁 Catégorie', value: channel.parent.name });
+  }
   
   if (executor) {
     embed.addFields({ name: '👤 Supprimé par', value: `${executor} (${executor.id})` });
   }
+  
+  embed.addFields({ name: '📅 Date', value: `<t:${Math.floor(Date.now() / 1000)}:F>` });
   
   await logChannel.send({ embeds: [embed] });
 });
@@ -605,17 +915,64 @@ client.on('channelUpdate', async (oldChannel, newChannel) => {
   
   const changes = [];
   
-  // Vérifier les changements
+  // Vérifier les changements généraux
   if (oldChannel.name !== newChannel.name) {
-    changes.push(`**Nom:** ${oldChannel.name} → ${newChannel.name}`);
+    changes.push(`**📝 Nom:** ${oldChannel.name} → ${newChannel.name}`);
   }
   
-  if (oldChannel.topic !== newChannel.topic) {
-    changes.push(`**Sujet:** ${oldChannel.topic || 'Aucun'} → ${newChannel.topic || 'Aucun'}`);
+  if (oldChannel.position !== newChannel.position) {
+    changes.push(`**📊 Position:** ${oldChannel.position} → ${newChannel.position}`);
   }
   
-  if (oldChannel.nsfw !== newChannel.nsfw) {
-    changes.push(`**NSFW:** ${oldChannel.nsfw ? 'Oui' : 'Non'} → ${newChannel.nsfw ? 'Oui' : 'Non'}`);
+  // Changements de catégorie
+  if (oldChannel.parentId !== newChannel.parentId) {
+    const oldParent = oldChannel.parent ? oldChannel.parent.name : 'Aucune';
+    const newParent = newChannel.parent ? newChannel.parent.name : 'Aucune';
+    changes.push(`**📁 Catégorie:** ${oldParent} → ${newParent}`);
+  }
+  
+  // Changements pour salons textuels
+  if (oldChannel.type === 0) {
+    if (oldChannel.topic !== newChannel.topic) {
+      const oldTopic = oldChannel.topic || 'Aucun';
+      const newTopic = newChannel.topic || 'Aucun';
+      changes.push(`**📄 Sujet:** ${oldTopic.substring(0, 50)} → ${newTopic.substring(0, 50)}`);
+    }
+    
+    if (oldChannel.nsfw !== newChannel.nsfw) {
+      changes.push(`**🔞 NSFW:** ${oldChannel.nsfw ? 'Oui' : 'Non'} → ${newChannel.nsfw ? 'Oui' : 'Non'}`);
+    }
+    
+    if (oldChannel.rateLimitPerUser !== newChannel.rateLimitPerUser) {
+      changes.push(`**⏱️ Ralenti:** ${oldChannel.rateLimitPerUser}s → ${newChannel.rateLimitPerUser}s`);
+    }
+  }
+  
+  // Changements pour salons vocaux
+  if (oldChannel.type === 2) {
+    if (oldChannel.bitrate !== newChannel.bitrate) {
+      changes.push(`**🎵 Qualité audio:** ${oldChannel.bitrate / 1000}kbps → ${newChannel.bitrate / 1000}kbps`);
+    }
+    
+    if (oldChannel.userLimit !== newChannel.userLimit) {
+      const oldLimit = oldChannel.userLimit || 'Illimité';
+      const newLimit = newChannel.userLimit || 'Illimité';
+      changes.push(`**👥 Limite utilisateurs:** ${oldLimit} → ${newLimit}`);
+    }
+    
+    if (oldChannel.rtcRegion !== newChannel.rtcRegion) {
+      const oldRegion = oldChannel.rtcRegion || 'Auto';
+      const newRegion = newChannel.rtcRegion || 'Auto';
+      changes.push(`**🌍 Région:** ${oldRegion} → ${newRegion}`);
+    }
+  }
+  
+  // Vérifier les changements de permissions
+  const oldPerms = oldChannel.permissionOverwrites.cache;
+  const newPerms = newChannel.permissionOverwrites.cache;
+  
+  if (oldPerms.size !== newPerms.size) {
+    changes.push(`**🔐 Permissions modifiées:** ${oldPerms.size} → ${newPerms.size} règles`);
   }
   
   if (changes.length === 0) return;
