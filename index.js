@@ -10,6 +10,7 @@ const client = new Client({
     GatewayIntentBits.GuildModeration,
     GatewayIntentBits.GuildVoiceStates,
     GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildInvites,
   ],
   partials: [
     Partials.Message,
@@ -36,11 +37,15 @@ const logChannels = {
   voice: new Map(),
   roles: new Map(),
   channels: new Map(),
-  members: new Map()
+  members: new Map(),
+  invites: new Map()
 };
 
 // Stocker les messages pour détecter qui les a supprimés
 const messageCache = new Map();
+
+// Stocker les invitations pour suivre qui invite qui
+const invitesCache = new Map();
 
 // Fonction pour vérifier si un rôle a des permissions importantes
 function hasImportantPermissions(role) {
@@ -88,6 +93,7 @@ async function ensureTableExists() {
         log_roles VARCHAR(50),
         log_channels VARCHAR(50),
         log_members VARCHAR(50),
+        log_invites VARCHAR(50),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
@@ -107,6 +113,12 @@ async function ensureTableExists() {
       if (!existingColumns.includes('log_members')) {
         await pool.query(`ALTER TABLE log_config ADD COLUMN log_members VARCHAR(50)`);
         console.log('✅ Colonne log_members ajoutée');
+      }
+      
+      // Ajouter log_invites si elle n'existe pas
+      if (!existingColumns.includes('log_invites')) {
+        await pool.query(`ALTER TABLE log_config ADD COLUMN log_invites VARCHAR(50)`);
+        console.log('✅ Colonne log_invites ajoutée');
       }
     } catch (migrationError) {
       console.log('⚠️  Migration déjà effectuée ou erreur:', migrationError.message);
@@ -156,6 +168,10 @@ async function loadConfig() {
       }
       if (row.log_members) {
         logChannels.members.set(row.guild_id, row.log_members);
+        count++;
+      }
+      if (row.log_invites) {
+        logChannels.invites.set(row.guild_id, row.log_invites);
         count++;
       }
     });
@@ -224,6 +240,18 @@ client.once('clientReady', async () => {
     console.log('⚠️  Mode sans base de données - Config temporaire');
   }
   
+  // Charger toutes les invitations existantes pour chaque serveur
+  console.log('🔄 Chargement des invitations...');
+  for (const guild of client.guilds.cache.values()) {
+    try {
+      const invites = await guild.invites.fetch();
+      invitesCache.set(guild.id, new Map(invites.map(invite => [invite.code, invite.uses])));
+      console.log(`✅ ${invites.size} invitations chargées pour ${guild.name}`);
+    } catch (error) {
+      console.error(`❌ Erreur chargement invitations pour ${guild.name}:`, error.message);
+    }
+  }
+  
   // Enregistrer les commandes slash
   const commands = [
     new SlashCommandBuilder()
@@ -285,6 +313,18 @@ client.once('clientReady', async () => {
             option
               .setName('channel')
               .setDescription('Le salon où envoyer les logs de membres')
+              .addChannelTypes(ChannelType.GuildText)
+              .setRequired(true)
+          )
+      )
+      .addSubcommand(subcommand =>
+        subcommand
+          .setName('invitations')
+          .setDescription('Configure les logs des invitations (création, utilisation, inviteur)')
+          .addChannelOption(option =>
+            option
+              .setName('channel')
+              .setDescription('Le salon où envoyer les logs d\'invitations')
               .addChannelTypes(ChannelType.GuildText)
               .setRequired(true)
           )
@@ -355,6 +395,27 @@ client.on('interactionCreate', async (interaction) => {
         content: `✅ Les logs de membres seront envoyés dans ${channel}\n${saved ? '💾 Configuration sauvegardée en BDD!' : '⚠️ Config temporaire (pas de BDD)'}`,
         flags: 64 // MessageFlags.Ephemeral
       });
+    }
+    
+    if (subcommand === 'invitations') {
+      logChannels.invites.set(interaction.guildId, channel.id);
+      const saved = await saveConfig(interaction.guildId, 'invites', channel.id);
+      
+      // Charger les invitations pour ce serveur si pas déjà fait
+      try {
+        const invites = await interaction.guild.invites.fetch();
+        invitesCache.set(interaction.guildId, new Map(invites.map(invite => [invite.code, invite.uses])));
+        
+        await interaction.reply({
+          content: `✅ Les logs d'invitations seront envoyés dans ${channel}\n${saved ? '💾 Configuration sauvegardée en BDD!' : '⚠️ Config temporaire (pas de BDD)'}\n📊 ${invites.size} invitations actuellement actives`,
+          flags: 64 // MessageFlags.Ephemeral
+        });
+      } catch (error) {
+        await interaction.reply({
+          content: `✅ Les logs d'invitations seront envoyés dans ${channel}\n⚠️ Erreur de chargement des invitations: ${error.message}`,
+          flags: 64 // MessageFlags.Ephemeral
+        });
+      }
     }
   }
 });
@@ -1188,36 +1249,98 @@ client.on('channelUpdate', async (oldChannel, newChannel) => {
 
 // Logger l'arrivée d'un membre
 client.on('guildMemberAdd', async (member) => {
-  const logChannelId = logChannels.members.get(member.guild.id);
-  if (!logChannelId) return;
+  // Détecter qui a invité le membre
+  let inviter = null;
+  let inviteCode = null;
   
-  const logChannel = member.guild.channels.cache.get(logChannelId);
-  if (!logChannel) return;
-  
-  const accountAge = Math.floor((Date.now() - member.user.createdTimestamp) / (1000 * 60 * 60 * 24));
-  
-  const embed = new EmbedBuilder()
-    .setTitle('📥 Membre a rejoint le serveur')
-    .setColor('#00FF00')
-    .setThumbnail(member.user.displayAvatarURL({ size: 512 }))
-    .addFields(
-      { name: '👤 Membre', value: `${member.user} (${member.user.tag})`, inline: true },
-      { name: '🆔 ID', value: member.user.id, inline: true },
-      { name: '📊 Membres totaux', value: member.guild.memberCount.toString(), inline: true },
-      { name: '📅 Compte créé le', value: `<t:${Math.floor(member.user.createdTimestamp / 1000)}:F>\n(<t:${Math.floor(member.user.createdTimestamp / 1000)}:R>)`, inline: false },
-      { name: '⏰ Âge du compte', value: `${accountAge} jours`, inline: true },
-      { name: '📥 A rejoint le', value: `<t:${Math.floor(member.joinedTimestamp / 1000)}:F>`, inline: false }
-    )
-    .setFooter({ text: `ID: ${member.user.id}` })
-    .setTimestamp();
-  
-  // Avertissement si compte récent
-  if (accountAge < 7) {
-    embed.addFields({ name: '⚠️ Attention', value: `Compte créé il y a seulement ${accountAge} jours` });
-    embed.setColor('#FFA500');
+  try {
+    const newInvites = await member.guild.invites.fetch();
+    const oldInvites = invitesCache.get(member.guild.id) || new Map();
+    
+    // Comparer les utilisations pour trouver quelle invitation a été utilisée
+    for (const [code, invite] of newInvites) {
+      const oldUses = oldInvites.get(code) || 0;
+      if (invite.uses > oldUses) {
+        inviter = invite.inviter;
+        inviteCode = code;
+        break;
+      }
+    }
+    
+    // Mettre à jour le cache
+    invitesCache.set(member.guild.id, new Map(newInvites.map(invite => [invite.code, invite.uses])));
+  } catch (error) {
+    console.error('Erreur détection inviteur:', error.message);
   }
   
-  await logChannel.send({ embeds: [embed] });
+  // Log dans le salon des membres
+  const memberLogChannelId = logChannels.members.get(member.guild.id);
+  if (memberLogChannelId) {
+    const logChannel = member.guild.channels.cache.get(memberLogChannelId);
+    if (logChannel) {
+      const accountAge = Math.floor((Date.now() - member.user.createdTimestamp) / (1000 * 60 * 60 * 24));
+      
+      const embed = new EmbedBuilder()
+        .setTitle('📥 Membre a rejoint le serveur')
+        .setColor('#00FF00')
+        .setThumbnail(member.user.displayAvatarURL({ size: 512 }))
+        .addFields(
+          { name: '👤 Membre', value: `${member.user} (${member.user.tag})`, inline: true },
+          { name: '🆔 ID', value: member.user.id, inline: true },
+          { name: '📊 Membres totaux', value: member.guild.memberCount.toString(), inline: true },
+          { name: '📅 Compte créé le', value: `<t:${Math.floor(member.user.createdTimestamp / 1000)}:F>\n(<t:${Math.floor(member.user.createdTimestamp / 1000)}:R>)`, inline: false },
+          { name: '⏰ Âge du compte', value: `${accountAge} jours`, inline: true },
+          { name: '📥 A rejoint le', value: `<t:${Math.floor(member.joinedTimestamp / 1000)}:F>`, inline: false }
+        )
+        .setFooter({ text: `ID: ${member.user.id}` })
+        .setTimestamp();
+      
+      // Afficher qui a invité
+      if (inviter && inviteCode) {
+        embed.addFields({ 
+          name: '🎟️ Invité par', 
+          value: `${inviter} (${inviter.tag})\nCode: \`${inviteCode}\``, 
+          inline: false 
+        });
+      }
+      
+      // Avertissement si compte récent
+      if (accountAge < 7) {
+        embed.addFields({ name: '⚠️ Attention', value: `Compte créé il y a seulement ${accountAge} jours` });
+        embed.setColor('#FFA500');
+      }
+      
+      await logChannel.send({ embeds: [embed] });
+    }
+  }
+  
+  // Log dans le salon des invitations
+  if (inviter && inviteCode) {
+    const inviteLogChannelId = logChannels.invites.get(member.guild.id);
+    if (inviteLogChannelId) {
+      const logChannel = member.guild.channels.cache.get(inviteLogChannelId);
+      if (logChannel) {
+        // Compter le nombre total de personnes invitées via ce code
+        const currentInvites = invitesCache.get(member.guild.id);
+        const totalUses = currentInvites?.get(inviteCode) || 0;
+        
+        const embed = new EmbedBuilder()
+          .setTitle('🎟️ Invitation utilisée')
+          .setColor('#00FF00')
+          .setThumbnail(member.user.displayAvatarURL({ size: 512 }))
+          .addFields(
+            { name: '👤 Nouveau membre', value: `${member.user} (${member.user.tag})`, inline: false },
+            { name: '🎫 Invité par', value: `${inviter} (${inviter.tag})`, inline: true },
+            { name: '🔑 Code d\'invitation', value: `\`${inviteCode}\``, inline: true },
+            { name: '📊 Utilisations totales', value: `${totalUses} personnes invitées via ce lien`, inline: false },
+            { name: '📅 Date', value: `<t:${Math.floor(Date.now() / 1000)}:F>` }
+          )
+          .setTimestamp();
+        
+        await logChannel.send({ embeds: [embed] });
+      }
+    }
+  }
 });
 
 // Logger le départ d'un membre
@@ -1507,6 +1630,76 @@ client.on('userUpdate', async (oldUser, newUser) => {
       await logChannel.send({ embeds: [embed] });
     }
   });
+});
+
+// ========== LOGS INVITATIONS ==========
+
+// Logger la création d'une invitation
+client.on('inviteCreate', async (invite) => {
+  const logChannelId = logChannels.invites.get(invite.guild.id);
+  if (!logChannelId) return;
+  
+  const logChannel = invite.guild.channels.cache.get(logChannelId);
+  if (!logChannel) return;
+  
+  // Ajouter l'invitation au cache
+  if (!invitesCache.has(invite.guild.id)) {
+    invitesCache.set(invite.guild.id, new Map());
+  }
+  invitesCache.get(invite.guild.id).set(invite.code, invite.uses || 0);
+  
+  const embed = new EmbedBuilder()
+    .setTitle('➕ Invitation créée')
+    .setColor('#00FF00')
+    .addFields(
+      { name: '🔑 Code', value: `\`${invite.code}\``, inline: true },
+      { name: '🔗 Lien', value: `[discord.gg/${invite.code}](${invite.url})`, inline: true },
+      { name: '👤 Créée par', value: invite.inviter ? `${invite.inviter} (${invite.inviter.tag})` : 'Inconnu', inline: false },
+      { name: '📍 Salon', value: `${invite.channel}`, inline: true },
+      { name: '⏰ Expire', value: invite.maxAge === 0 ? 'Jamais' : `<t:${Math.floor((Date.now() + invite.maxAge * 1000) / 1000)}:R>`, inline: true },
+      { name: '📊 Utilisations max', value: invite.maxUses === 0 ? 'Illimité' : invite.maxUses.toString(), inline: true },
+      { name: '👥 Temporaire', value: invite.temporary ? 'Oui' : 'Non', inline: true },
+      { name: '📅 Date de création', value: `<t:${Math.floor(invite.createdTimestamp / 1000)}:F>` }
+    )
+    .setTimestamp();
+  
+  if (invite.inviter) {
+    embed.setThumbnail(invite.inviter.displayAvatarURL());
+  }
+  
+  await logChannel.send({ embeds: [embed] });
+});
+
+// Logger la suppression d'une invitation
+client.on('inviteDelete', async (invite) => {
+  const logChannelId = logChannels.invites.get(invite.guild.id);
+  if (!logChannelId) return;
+  
+  const logChannel = invite.guild.channels.cache.get(logChannelId);
+  if (!logChannel) return;
+  
+  // Retirer l'invitation du cache
+  if (invitesCache.has(invite.guild.id)) {
+    invitesCache.get(invite.guild.id).delete(invite.code);
+  }
+  
+  const embed = new EmbedBuilder()
+    .setTitle('🗑️ Invitation supprimée')
+    .setColor('#FF0000')
+    .addFields(
+      { name: '🔑 Code', value: `\`${invite.code}\``, inline: true },
+      { name: '👤 Créée par', value: invite.inviter ? `${invite.inviter} (${invite.inviter.tag})` : 'Inconnu', inline: true },
+      { name: '📍 Salon', value: `${invite.channel}`, inline: true },
+      { name: '📊 Utilisations', value: `${invite.uses || 0}`, inline: true },
+      { name: '📅 Date de suppression', value: `<t:${Math.floor(Date.now() / 1000)}:F>` }
+    )
+    .setTimestamp();
+  
+  if (invite.inviter) {
+    embed.setThumbnail(invite.inviter.displayAvatarURL());
+  }
+  
+  await logChannel.send({ embeds: [embed] });
 });
 
 // Connexion du bot avec votre token
