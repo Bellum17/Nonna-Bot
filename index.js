@@ -35,11 +35,44 @@ const logChannels = {
   messages: new Map(),
   voice: new Map(),
   roles: new Map(),
-  channels: new Map()
+  channels: new Map(),
+  members: new Map()
 };
 
 // Stocker les messages pour détecter qui les a supprimés
 const messageCache = new Map();
+
+// Fonction pour vérifier si un rôle a des permissions importantes
+function hasImportantPermissions(role) {
+  const importantPerms = [
+    'Administrator',
+    'ManageGuild',
+    'ManageRoles',
+    'ManageChannels',
+    'KickMembers',
+    'BanMembers',
+    'ManageMessages',
+    'MentionEveryone',
+    'ManageWebhooks'
+  ];
+  
+  return importantPerms.some(perm => role.permissions.has(perm));
+}
+
+// Fonction pour obtenir les permissions importantes d'un rôle
+function getImportantPermissions(role) {
+  const perms = [];
+  if (role.permissions.has('Administrator')) perms.push('👑 Admin');
+  if (role.permissions.has('ManageGuild')) perms.push('⚙️ Gérer serveur');
+  if (role.permissions.has('ManageRoles')) perms.push('🎭 Gérer rôles');
+  if (role.permissions.has('ManageChannels')) perms.push('📁 Gérer salons');
+  if (role.permissions.has('KickMembers')) perms.push('👢 Expulser');
+  if (role.permissions.has('BanMembers')) perms.push('🔨 Bannir');
+  if (role.permissions.has('ManageMessages')) perms.push('🗑️ Gérer messages');
+  if (role.permissions.has('MentionEveryone')) perms.push('📢 @everyone');
+  if (role.permissions.has('ManageWebhooks')) perms.push('🔗 Webhooks');
+  return perms;
+}
 
 // Créer la table si elle n'existe pas
 async function ensureTableExists() {
@@ -53,6 +86,7 @@ async function ensureTableExists() {
         log_voice VARCHAR(50),
         log_roles VARCHAR(50),
         log_channels VARCHAR(50),
+        log_members VARCHAR(50),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
@@ -97,6 +131,10 @@ async function loadConfig() {
       }
       if (row.log_channels) {
         logChannels.channels.set(row.guild_id, row.log_channels);
+        count++;
+      }
+      if (row.log_members) {
+        logChannels.members.set(row.guild_id, row.log_members);
         count++;
       }
     });
@@ -218,6 +256,18 @@ client.once('clientReady', async () => {
               .setRequired(true)
           )
       )
+      .addSubcommand(subcommand =>
+        subcommand
+          .setName('membres')
+          .setDescription('Configure les logs des activités des membres')
+          .addChannelOption(option =>
+            option
+              .setName('channel')
+              .setDescription('Le salon où envoyer les logs de membres')
+              .addChannelTypes(ChannelType.GuildText)
+              .setRequired(true)
+          )
+      )
       .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
   ];
 
@@ -273,6 +323,15 @@ client.on('interactionCreate', async (interaction) => {
       const saved = await saveConfig(interaction.guildId, 'channels', channel.id);
       await interaction.reply({
         content: `✅ Les logs de salons seront envoyés dans ${channel}\n${saved ? '💾 Configuration sauvegardée en BDD!' : '⚠️ Config temporaire (pas de BDD)'}`,
+        ephemeral: true
+      });
+    }
+    
+    if (subcommand === 'membres') {
+      logChannels.members.set(interaction.guildId, channel.id);
+      const saved = await saveConfig(interaction.guildId, 'members', channel.id);
+      await interaction.reply({
+        content: `✅ Les logs de membres seront envoyés dans ${channel}\n${saved ? '💾 Configuration sauvegardée en BDD!' : '⚠️ Config temporaire (pas de BDD)'}`,
         ephemeral: true
       });
     }
@@ -536,16 +595,42 @@ client.on('guildMemberUpdate', async (oldMember, newMember) => {
     .setTimestamp();
   
   if (addedRoles.size > 0) {
+    const roleDetails = addedRoles.map(role => {
+      const perms = [];
+      if (role.permissions.has('Administrator')) perms.push('👑 Admin');
+      if (role.permissions.has('ManageGuild')) perms.push('⚙️ Gérer serveur');
+      if (role.permissions.has('ManageRoles')) perms.push('🎭 Gérer rôles');
+      if (role.permissions.has('ManageChannels')) perms.push('📁 Gérer salons');
+      if (role.permissions.has('KickMembers')) perms.push('👢 Expulser');
+      if (role.permissions.has('BanMembers')) perms.push('🔨 Bannir');
+      if (role.permissions.has('ManageMessages')) perms.push('🗑️ Gérer messages');
+      
+      return `${role} ${perms.length > 0 ? `\n└ ${perms.join(', ')}` : ''}`;
+    }).join('\n');
+    
     embed.addFields({ 
       name: '✅ Rôles ajoutés', 
-      value: addedRoles.map(role => role.toString()).join(', ') 
+      value: roleDetails.substring(0, 1024)
     });
   }
   
   if (removedRoles.size > 0) {
+    const roleDetails = removedRoles.map(role => {
+      const perms = [];
+      if (role.permissions.has('Administrator')) perms.push('👑 Admin');
+      if (role.permissions.has('ManageGuild')) perms.push('⚙️ Gérer serveur');
+      if (role.permissions.has('ManageRoles')) perms.push('🎭 Gérer rôles');
+      if (role.permissions.has('ManageChannels')) perms.push('📁 Gérer salons');
+      if (role.permissions.has('KickMembers')) perms.push('👢 Expulser');
+      if (role.permissions.has('BanMembers')) perms.push('🔨 Bannir');
+      if (role.permissions.has('ManageMessages')) perms.push('🗑️ Gérer messages');
+      
+      return `${role} ${perms.length > 0 ? `\n└ ${perms.join(', ')}` : ''}`;
+    }).join('\n');
+    
     embed.addFields({ 
       name: '❌ Rôles retirés', 
-      value: removedRoles.map(role => role.toString()).join(', ') 
+      value: roleDetails.substring(0, 1024)
     });
   }
   
@@ -975,11 +1060,61 @@ client.on('channelUpdate', async (oldChannel, newChannel) => {
   const oldPerms = oldChannel.permissionOverwrites.cache;
   const newPerms = newChannel.permissionOverwrites.cache;
   
-  if (oldPerms.size !== newPerms.size) {
-    changes.push(`**🔐 Permissions modifiées:** ${oldPerms.size} → ${newPerms.size} règles`);
-  }
+  const permChanges = [];
   
-  if (changes.length === 0) return;
+  // Permissions ajoutées
+  newPerms.forEach(newPerm => {
+    const oldPerm = oldPerms.get(newPerm.id);
+    if (!oldPerm) {
+      // Nouvelle permission ajoutée
+      const target = newPerm.type === 0 ? `<@&${newPerm.id}>` : `<@${newPerm.id}>`;
+      const targetType = newPerm.type === 0 ? '🎭 Rôle' : '👤 Membre';
+      permChanges.push(`**✅ ${targetType} ajouté:** ${target}`);
+    } else {
+      // Permission modifiée - vérifier les différences
+      const allowChanges = [];
+      const denyChanges = [];
+      
+      // Comparer les permissions autorisées
+      if (newPerm.allow.bitfield !== oldPerm.allow.bitfield) {
+        const newAllows = newPerm.allow.toArray();
+        const oldAllows = oldPerm.allow.toArray();
+        const added = newAllows.filter(p => !oldAllows.includes(p));
+        const removed = oldAllows.filter(p => !newAllows.includes(p));
+        
+        if (added.length > 0) allowChanges.push(`✅ ${added.join(', ')}`);
+        if (removed.length > 0) allowChanges.push(`❌ ${removed.join(', ')}`);
+      }
+      
+      // Comparer les permissions refusées
+      if (newPerm.deny.bitfield !== oldPerm.deny.bitfield) {
+        const newDenies = newPerm.deny.toArray();
+        const oldDenies = oldPerm.deny.toArray();
+        const added = newDenies.filter(p => !oldDenies.includes(p));
+        const removed = oldDenies.filter(p => !newDenies.includes(p));
+        
+        if (added.length > 0) denyChanges.push(`🚫 ${added.join(', ')}`);
+        if (removed.length > 0) denyChanges.push(`✅ ${removed.join(', ')} (refus retiré)`);
+      }
+      
+      if (allowChanges.length > 0 || denyChanges.length > 0) {
+        const target = newPerm.type === 0 ? `<@&${newPerm.id}>` : `<@${newPerm.id}>`;
+        const targetType = newPerm.type === 0 ? '🎭 Rôle' : '👤 Membre';
+        permChanges.push(`**🔧 ${targetType}:** ${target}\n${[...allowChanges, ...denyChanges].join('\n')}`);
+      }
+    }
+  });
+  
+  // Permissions supprimées
+  oldPerms.forEach(oldPerm => {
+    if (!newPerms.has(oldPerm.id)) {
+      const target = oldPerm.type === 0 ? `<@&${oldPerm.id}>` : `<@${oldPerm.id}>`;
+      const targetType = oldPerm.type === 0 ? '🎭 Rôle' : '👤 Membre';
+      permChanges.push(`**❌ ${targetType} retiré:** ${target}`);
+    }
+  });
+  
+  if (changes.length === 0 && permChanges.length === 0) return;
   
   // Chercher qui a modifié le salon
   let executor = null;
@@ -1003,17 +1138,354 @@ client.on('channelUpdate', async (oldChannel, newChannel) => {
     .setColor('#FFA500')
     .addFields(
       { name: '📝 Salon', value: `${newChannel}`, inline: true },
-      { name: '🆔 ID', value: newChannel.id, inline: true },
-      { name: '🔄 Modifications', value: changes.join('\n'), inline: false },
-      { name: '📅 Date', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: false }
+      { name: '🆔 ID', value: newChannel.id, inline: true }
     )
     .setTimestamp();
+  
+  if (changes.length > 0) {
+    embed.addFields({ name: '🔄 Modifications', value: changes.join('\n').substring(0, 1024), inline: false });
+  }
+  
+  if (permChanges.length > 0) {
+    embed.addFields({ 
+      name: '� Permissions modifiées', 
+      value: permChanges.join('\n').substring(0, 1024), 
+      inline: false 
+    });
+  }
   
   if (executor) {
     embed.addFields({ name: '👤 Modifié par', value: `${executor} (${executor.id})` });
   }
   
+  embed.addFields({ name: '📅 Date', value: `<t:${Math.floor(Date.now() / 1000)}:F>` });
+  
   await logChannel.send({ embeds: [embed] });
+});
+
+// ========== LOGS MEMBRES ==========
+
+// Logger l'arrivée d'un membre
+client.on('guildMemberAdd', async (member) => {
+  const logChannelId = logChannels.members.get(member.guild.id);
+  if (!logChannelId) return;
+  
+  const logChannel = member.guild.channels.cache.get(logChannelId);
+  if (!logChannel) return;
+  
+  const accountAge = Math.floor((Date.now() - member.user.createdTimestamp) / (1000 * 60 * 60 * 24));
+  
+  const embed = new EmbedBuilder()
+    .setTitle('📥 Membre a rejoint le serveur')
+    .setColor('#00FF00')
+    .setThumbnail(member.user.displayAvatarURL({ size: 512 }))
+    .addFields(
+      { name: '👤 Membre', value: `${member.user} (${member.user.tag})`, inline: true },
+      { name: '🆔 ID', value: member.user.id, inline: true },
+      { name: '📊 Membres totaux', value: member.guild.memberCount.toString(), inline: true },
+      { name: '📅 Compte créé le', value: `<t:${Math.floor(member.user.createdTimestamp / 1000)}:F>\n(<t:${Math.floor(member.user.createdTimestamp / 1000)}:R>)`, inline: false },
+      { name: '⏰ Âge du compte', value: `${accountAge} jours`, inline: true },
+      { name: '📥 A rejoint le', value: `<t:${Math.floor(member.joinedTimestamp / 1000)}:F>`, inline: false }
+    )
+    .setFooter({ text: `ID: ${member.user.id}` })
+    .setTimestamp();
+  
+  // Avertissement si compte récent
+  if (accountAge < 7) {
+    embed.addFields({ name: '⚠️ Attention', value: `Compte créé il y a seulement ${accountAge} jours` });
+    embed.setColor('#FFA500');
+  }
+  
+  await logChannel.send({ embeds: [embed] });
+});
+
+// Logger le départ d'un membre
+client.on('guildMemberRemove', async (member) => {
+  const logChannelId = logChannels.members.get(member.guild.id);
+  if (!logChannelId) return;
+  
+  const logChannel = member.guild.channels.cache.get(logChannelId);
+  if (!logChannel) return;
+  
+  // Vérifier si le membre a été banni ou kick
+  let action = 'quitté';
+  let executor = null;
+  let color = '#FF0000';
+  
+  try {
+    const banLogs = await member.guild.fetchAuditLogs({
+      type: AuditLogEvent.MemberBanAdd,
+      limit: 1
+    });
+    
+    const banLog = banLogs.entries.first();
+    if (banLog && banLog.target.id === member.user.id && 
+        banLog.createdTimestamp > Date.now() - 5000) {
+      action = 'banni';
+      executor = banLog.executor;
+      color = '#8B0000';
+    } else {
+      const kickLogs = await member.guild.fetchAuditLogs({
+        type: AuditLogEvent.MemberKick,
+        limit: 1
+      });
+      
+      const kickLog = kickLogs.entries.first();
+      if (kickLog && kickLog.target.id === member.user.id && 
+          kickLog.createdTimestamp > Date.now() - 5000) {
+        action = 'expulsé';
+        executor = kickLog.executor;
+        color = '#FF6600';
+      }
+    }
+  } catch (error) {
+    console.error('Erreur audit logs:', error);
+  }
+  
+  const timeOnServer = member.joinedTimestamp ? 
+    Math.floor((Date.now() - member.joinedTimestamp) / (1000 * 60 * 60 * 24)) : 'Inconnu';
+  
+  const embed = new EmbedBuilder()
+    .setTitle(`📤 Membre a ${action} le serveur`)
+    .setColor(color)
+    .setThumbnail(member.user.displayAvatarURL({ size: 512 }))
+    .addFields(
+      { name: '👤 Membre', value: `${member.user} (${member.user.tag})`, inline: true },
+      { name: '🆔 ID', value: member.user.id, inline: true },
+      { name: '📊 Membres restants', value: member.guild.memberCount.toString(), inline: true },
+      { name: '📥 Avait rejoint le', value: member.joinedTimestamp ? `<t:${Math.floor(member.joinedTimestamp / 1000)}:F>` : 'Inconnu', inline: false },
+      { name: '⏰ Temps sur le serveur', value: `${timeOnServer} jours`, inline: true }
+    )
+    .setFooter({ text: `ID: ${member.user.id}` })
+    .setTimestamp();
+  
+  // Afficher les rôles qu'il avait
+  const roles = member.roles.cache.filter(role => role.id !== member.guild.id);
+  if (roles.size > 0) {
+    const roleList = roles.map(role => {
+      const hasImportant = hasImportantPermissions(role);
+      return hasImportant ? `⚠️ ${role}` : role.toString();
+    }).join(', ');
+    
+    embed.addFields({ 
+      name: `🎭 Rôles (${roles.size})`, 
+      value: roleList.substring(0, 1024) 
+    });
+  }
+  
+  if (executor) {
+    embed.addFields({ name: action === 'banni' ? '🔨 Banni par' : '👢 Expulsé par', value: `${executor} (${executor.id})` });
+  }
+  
+  await logChannel.send({ embeds: [embed] });
+});
+
+// Logger les mises à jour des membres
+client.on('guildMemberUpdate', async (oldMember, newMember) => {
+  const logChannelId = logChannels.members.get(newMember.guild.id);
+  if (!logChannelId) return;
+  
+  const logChannel = newMember.guild.channels.cache.get(logChannelId);
+  if (!logChannel) return;
+  
+  // Changement de pseudo serveur
+  if (oldMember.nickname !== newMember.nickname) {
+    const embed = new EmbedBuilder()
+      .setTitle('✏️ Pseudo serveur modifié')
+      .setColor('#3498DB')
+      .setThumbnail(newMember.user.displayAvatarURL())
+      .addFields(
+        { name: '👤 Membre', value: `${newMember.user}`, inline: true },
+        { name: '🆔 ID', value: newMember.user.id, inline: true },
+        { name: '📝 Ancien pseudo', value: oldMember.nickname || oldMember.user.username, inline: false },
+        { name: '📝 Nouveau pseudo', value: newMember.nickname || newMember.user.username, inline: false },
+        { name: '📅 Date', value: `<t:${Math.floor(Date.now() / 1000)}:F>` }
+      )
+      .setTimestamp();
+    
+    await logChannel.send({ embeds: [embed] });
+  }
+  
+  // Changement d'avatar serveur
+  if (oldMember.avatar !== newMember.avatar) {
+    const embed = new EmbedBuilder()
+      .setTitle('🖼️ Avatar serveur modifié')
+      .setColor('#9B59B6')
+      .addFields(
+        { name: '👤 Membre', value: `${newMember.user}`, inline: true },
+        { name: '🆔 ID', value: newMember.user.id, inline: true },
+        { name: '📅 Date', value: `<t:${Math.floor(Date.now() / 1000)}:F>` }
+      )
+      .setTimestamp();
+    
+    if (oldMember.avatar) {
+      embed.setThumbnail(oldMember.displayAvatarURL({ size: 512 }));
+      embed.addFields({ name: '🖼️ Ancien avatar serveur', value: '[Voir l\'image]('+oldMember.displayAvatarURL({ size: 512 })+')' });
+    }
+    
+    if (newMember.avatar) {
+      embed.setImage(newMember.displayAvatarURL({ size: 512 }));
+      embed.addFields({ name: '🖼️ Nouvel avatar serveur', value: '[Voir l\'image]('+newMember.displayAvatarURL({ size: 512 })+')' });
+    } else {
+      embed.addFields({ name: '🖼️ Avatar serveur', value: 'Avatar serveur retiré' });
+    }
+    
+    await logChannel.send({ embeds: [embed] });
+  }
+  
+  // Changement de rôles
+  const oldRoles = oldMember.roles.cache;
+  const newRoles = newMember.roles.cache;
+  
+  const addedRoles = newRoles.filter(role => !oldRoles.has(role.id));
+  const removedRoles = oldRoles.filter(role => !newRoles.has(role.id));
+  
+  if (addedRoles.size > 0 || removedRoles.size > 0) {
+    // Chercher qui a fait la modification
+    let executor = null;
+    try {
+      const auditLogs = await newMember.guild.fetchAuditLogs({
+        type: AuditLogEvent.MemberRoleUpdate,
+        limit: 1
+      });
+      
+      const roleLog = auditLogs.entries.first();
+      if (roleLog && roleLog.target.id === newMember.id && 
+          roleLog.createdTimestamp > Date.now() - 5000) {
+        executor = roleLog.executor;
+      }
+    } catch (error) {
+      console.error('Erreur audit logs:', error);
+    }
+    
+    const embed = new EmbedBuilder()
+      .setTitle('🎭 Rôles modifiés')
+      .setColor('#9B59B6')
+      .setThumbnail(newMember.user.displayAvatarURL())
+      .addFields(
+        { name: '👤 Membre', value: `${newMember.user}`, inline: true },
+        { name: '🆔 ID', value: newMember.user.id, inline: true }
+      )
+      .setTimestamp();
+    
+    if (addedRoles.size > 0) {
+      const roleDetails = addedRoles.map(role => {
+        const hasImportant = hasImportantPermissions(role);
+        const perms = getImportantPermissions(role);
+        const warning = hasImportant ? '⚠️ ' : '';
+        return `${warning}${role}${perms.length > 0 ? `\n└ ${perms.join(', ')}` : ''}`;
+      }).join('\n');
+      
+      embed.addFields({ 
+        name: '✅ Rôles ajoutés', 
+        value: roleDetails.substring(0, 1024)
+      });
+    }
+    
+    if (removedRoles.size > 0) {
+      const roleDetails = removedRoles.map(role => {
+        const hasImportant = hasImportantPermissions(role);
+        const perms = getImportantPermissions(role);
+        const warning = hasImportant ? '⚠️ ' : '';
+        return `${warning}${role}${perms.length > 0 ? `\n└ ${perms.join(', ')}` : ''}`;
+      }).join('\n');
+      
+      embed.addFields({ 
+        name: '❌ Rôles retirés', 
+        value: roleDetails.substring(0, 1024)
+      });
+    }
+    
+    if (executor) {
+      embed.addFields({ name: '⚙️ Modifié par', value: `${executor}` });
+    }
+    
+    embed.addFields({ name: '📅 Date', value: `<t:${Math.floor(Date.now() / 1000)}:F>` });
+    
+    await logChannel.send({ embeds: [embed] });
+  }
+});
+
+// Logger les changements d'utilisateur (avatar global, nom d'utilisateur, bannière)
+client.on('userUpdate', async (oldUser, newUser) => {
+  // Vérifier dans quels serveurs l'utilisateur est présent
+  client.guilds.cache.forEach(async guild => {
+    const logChannelId = logChannels.members.get(guild.id);
+    if (!logChannelId) return;
+    
+    const member = guild.members.cache.get(newUser.id);
+    if (!member) return; // L'utilisateur n'est pas dans ce serveur
+    
+    const logChannel = guild.channels.cache.get(logChannelId);
+    if (!logChannel) return;
+    
+    // Changement de nom d'utilisateur
+    if (oldUser.username !== newUser.username) {
+      const embed = new EmbedBuilder()
+        .setTitle('👤 Nom d\'utilisateur modifié')
+        .setColor('#E74C3C')
+        .setThumbnail(newUser.displayAvatarURL())
+        .addFields(
+          { name: '👤 Utilisateur', value: `${newUser}`, inline: true },
+          { name: '🆔 ID', value: newUser.id, inline: true },
+          { name: '📝 Ancien nom', value: oldUser.username, inline: false },
+          { name: '📝 Nouveau nom', value: newUser.username, inline: false },
+          { name: '📅 Date', value: `<t:${Math.floor(Date.now() / 1000)}:F>` }
+        )
+        .setTimestamp();
+      
+      await logChannel.send({ embeds: [embed] });
+    }
+    
+    // Changement d'avatar global
+    if (oldUser.avatar !== newUser.avatar) {
+      const embed = new EmbedBuilder()
+        .setTitle('🖼️ Avatar global modifié')
+        .setColor('#1ABC9C')
+        .addFields(
+          { name: '👤 Utilisateur', value: `${newUser}`, inline: true },
+          { name: '🆔 ID', value: newUser.id, inline: true },
+          { name: '📅 Date', value: `<t:${Math.floor(Date.now() / 1000)}:F>` }
+        )
+        .setTimestamp();
+      
+      if (oldUser.avatar) {
+        embed.setThumbnail(oldUser.displayAvatarURL({ size: 512 }));
+        embed.addFields({ name: '🖼️ Ancien avatar', value: '[Voir l\'image]('+oldUser.displayAvatarURL({ size: 512 })+')' });
+      }
+      
+      if (newUser.avatar) {
+        embed.setImage(newUser.displayAvatarURL({ size: 512 }));
+        embed.addFields({ name: '🖼️ Nouvel avatar', value: '[Voir l\'image]('+newUser.displayAvatarURL({ size: 512 })+')' });
+      }
+      
+      await logChannel.send({ embeds: [embed] });
+    }
+    
+    // Changement de bannière
+    if (oldUser.banner !== newUser.banner) {
+      const embed = new EmbedBuilder()
+        .setTitle('🎨 Bannière modifiée')
+        .setColor('#F39C12')
+        .setThumbnail(newUser.displayAvatarURL())
+        .addFields(
+          { name: '👤 Utilisateur', value: `${newUser}`, inline: true },
+          { name: '🆔 ID', value: newUser.id, inline: true },
+          { name: '📅 Date', value: `<t:${Math.floor(Date.now() / 1000)}:F>` }
+        )
+        .setTimestamp();
+      
+      if (newUser.banner) {
+        const bannerURL = newUser.bannerURL({ size: 1024 });
+        embed.setImage(bannerURL);
+        embed.addFields({ name: '🎨 Nouvelle bannière', value: '[Voir l\'image]('+bannerURL+')' });
+      } else {
+        embed.addFields({ name: '🎨 Bannière', value: 'Bannière retirée' });
+      }
+      
+      await logChannel.send({ embeds: [embed] });
+    }
+  });
 });
 
 // Connexion du bot avec votre token
