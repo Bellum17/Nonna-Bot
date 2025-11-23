@@ -1,6 +1,5 @@
 const { Client, GatewayIntentBits, SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits, AuditLogEvent, ChannelType, Partials } = require('discord.js');
-const fs = require('fs');
-const path = require('path');
+const { Pool } = require('pg');
 
 // Créer un nouveau client Discord
 const client = new Client({
@@ -9,6 +8,7 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildModeration,
+    GatewayIntentBits.GuildVoiceStates,
   ],
   partials: [
     Partials.Message,
@@ -17,45 +17,102 @@ const client = new Client({
   ]
 });
 
-// Stocker les canaux de logs pour chaque serveur
-const logChannels = new Map();
+// Configuration PostgreSQL
+// Sur Railway, la variable DATABASE_URL est automatiquement fournie
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
+});
+
+// Stocker les canaux de logs pour chaque serveur (cache en mémoire)
+const logChannels = {
+  messages: new Map(),
+  voice: new Map()
+};
 
 // Stocker les messages pour détecter qui les a supprimés
 const messageCache = new Map();
 
-// Fichier de configuration
-const configPath = path.join(__dirname, 'config.json');
-
-// Fonction pour charger la configuration
-function loadConfig() {
+// Initialiser la base de données
+async function initDatabase() {
   try {
-    if (fs.existsSync(configPath)) {
-      const data = fs.readFileSync(configPath, 'utf8');
-      const config = JSON.parse(data);
-      
-      // Charger les canaux de logs
-      if (config.logChannels) {
-        Object.entries(config.logChannels).forEach(([guildId, channelId]) => {
-          logChannels.set(guildId, channelId);
-        });
+    // Créer la table si elle n'existe pas
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS guild_config (
+        guild_id VARCHAR(255) PRIMARY KEY,
+        log_channel_messages VARCHAR(255),
+        log_channel_voice VARCHAR(255),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    
+    console.log('✅ Base de données initialisée');
+  } catch (error) {
+    console.error('❌ Erreur lors de l\'initialisation de la base de données:', error);
+  }
+}
+
+// Charger la configuration depuis PostgreSQL
+async function loadConfig() {
+  try {
+    const result = await pool.query('SELECT * FROM guild_config');
+    
+    result.rows.forEach(row => {
+      if (row.log_channel_messages) {
+        logChannels.messages.set(row.guild_id, row.log_channel_messages);
       }
-      
-      console.log('✅ Configuration chargée avec succès');
-    }
+      if (row.log_channel_voice) {
+        logChannels.voice.set(row.guild_id, row.log_channel_voice);
+      }
+    });
+    
+    console.log('✅ Configuration chargée depuis PostgreSQL');
+    console.log(`📝 Serveurs avec logs messages: ${logChannels.messages.size}`);
+    console.log(`🎤 Serveurs avec logs vocaux: ${logChannels.voice.size}`);
   } catch (error) {
     console.error('❌ Erreur lors du chargement de la configuration:', error);
   }
 }
 
-// Fonction pour sauvegarder la configuration
-function saveConfig() {
+// Sauvegarder la configuration dans PostgreSQL
+async function saveConfig(guildId, type, channelId) {
   try {
-    const config = {
-      logChannels: Object.fromEntries(logChannels)
-    };
+    // Vérifier si la guild existe déjà
+    const checkResult = await pool.query(
+      'SELECT * FROM guild_config WHERE guild_id = $1',
+      [guildId]
+    );
     
-    fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf8');
-    console.log('✅ Configuration sauvegardée');
+    if (checkResult.rows.length > 0) {
+      // Mettre à jour
+      if (type === 'messages') {
+        await pool.query(
+          'UPDATE guild_config SET log_channel_messages = $1, updated_at = CURRENT_TIMESTAMP WHERE guild_id = $2',
+          [channelId, guildId]
+        );
+      } else if (type === 'voice') {
+        await pool.query(
+          'UPDATE guild_config SET log_channel_voice = $1, updated_at = CURRENT_TIMESTAMP WHERE guild_id = $2',
+          [channelId, guildId]
+        );
+      }
+    } else {
+      // Créer une nouvelle entrée
+      if (type === 'messages') {
+        await pool.query(
+          'INSERT INTO guild_config (guild_id, log_channel_messages) VALUES ($1, $2)',
+          [guildId, channelId]
+        );
+      } else if (type === 'voice') {
+        await pool.query(
+          'INSERT INTO guild_config (guild_id, log_channel_voice) VALUES ($1, $2)',
+          [guildId, channelId]
+        );
+      }
+    }
+    
+    console.log(`✅ Configuration sauvegardée dans PostgreSQL (${type})`);
   } catch (error) {
     console.error('❌ Erreur lors de la sauvegarde de la configuration:', error);
   }
@@ -65,8 +122,9 @@ function saveConfig() {
 client.once('clientReady', async () => {
   console.log(`✅ Bot connecté en tant que ${client.user.tag}`);
   
-  // Charger la configuration sauvegardée
-  loadConfig();
+  // Initialiser la base de données et charger la configuration
+  await initDatabase();
+  await loadConfig();
   
   // Enregistrer les commandes slash
   const commands = [
@@ -81,6 +139,18 @@ client.once('clientReady', async () => {
             option
               .setName('channel')
               .setDescription('Le salon où envoyer les logs')
+              .addChannelTypes(ChannelType.GuildText)
+              .setRequired(true)
+          )
+      )
+      .addSubcommand(subcommand =>
+        subcommand
+          .setName('vocal')
+          .setDescription('Configure les logs des activités vocales')
+          .addChannelOption(option =>
+            option
+              .setName('channel')
+              .setDescription('Le salon où envoyer les logs vocaux')
               .addChannelTypes(ChannelType.GuildText)
               .setRequired(true)
           )
@@ -105,17 +175,31 @@ client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
   if (interaction.commandName === 'setup_log') {
-    if (interaction.options.getSubcommand() === 'messages') {
-      const channel = interaction.options.getChannel('channel');
+    const subcommand = interaction.options.getSubcommand();
+    const channel = interaction.options.getChannel('channel');
+    
+    if (subcommand === 'messages') {
+      // Sauvegarder le canal de logs messages pour ce serveur
+      logChannels.messages.set(interaction.guildId, channel.id);
       
-      // Sauvegarder le canal de logs pour ce serveur
-      logChannels.set(interaction.guildId, channel.id);
-      
-      // Sauvegarder dans le fichier de configuration
-      saveConfig();
+      // Sauvegarder dans PostgreSQL
+      await saveConfig(interaction.guildId, 'messages', channel.id);
       
       await interaction.reply({
-        content: `✅ Les logs de messages seront envoyés dans ${channel}\n💾 Configuration sauvegardée!`,
+        content: `✅ Les logs de messages seront envoyés dans ${channel}\n💾 Configuration sauvegardée dans la base de données!`,
+        ephemeral: true
+      });
+    }
+    
+    if (subcommand === 'vocal') {
+      // Sauvegarder le canal de logs vocaux pour ce serveur
+      logChannels.voice.set(interaction.guildId, channel.id);
+      
+      // Sauvegarder dans PostgreSQL
+      await saveConfig(interaction.guildId, 'voice', channel.id);
+      
+      await interaction.reply({
+        content: `✅ Les logs vocaux seront envoyés dans ${channel}\n💾 Configuration sauvegardée dans la base de données!`,
         ephemeral: true
       });
     }
@@ -155,7 +239,7 @@ client.on('messageDelete', async (message) => {
 
   if (!message.guild) return; // Ignorer les DMs
   
-  const logChannelId = logChannels.get(message.guild.id);
+  const logChannelId = logChannels.messages.get(message.guild.id);
   if (!logChannelId) return;
 
   const logChannel = message.guild.channels.cache.get(logChannelId);
@@ -243,7 +327,7 @@ client.on('messageUpdate', async (oldMessage, newMessage) => {
   if (newMessage.author.bot) return;
   if (oldMessage.content === newMessage.content) return;
 
-  const logChannelId = logChannels.get(newMessage.guild.id);
+  const logChannelId = logChannels.messages.get(newMessage.guild.id);
   if (!logChannelId) return;
 
   const logChannel = newMessage.guild.channels.cache.get(logChannelId);
@@ -270,6 +354,115 @@ client.on('messageUpdate', async (oldMessage, newMessage) => {
   }
 
   await logChannel.send({ embeds: [embed] });
+});
+
+// Logger les activités vocales
+client.on('voiceStateUpdate', async (oldState, newState) => {
+  if (!newState.guild) return;
+  
+  const logChannelId = logChannels.voice.get(newState.guild.id);
+  if (!logChannelId) return;
+  
+  const logChannel = newState.guild.channels.cache.get(logChannelId);
+  if (!logChannel) return;
+  
+  const member = newState.member;
+  
+  // Rejoindre un salon vocal
+  if (!oldState.channel && newState.channel) {
+    const embed = new EmbedBuilder()
+      .setTitle('🎤 Utilisateur a rejoint un salon vocal')
+      .setColor('#00FF00')
+      .addFields(
+        { name: '👤 Utilisateur', value: `${member.user} (${member.user.id})`, inline: true },
+        { name: '🔊 Salon', value: `${newState.channel}`, inline: true },
+        { name: '📅 Date', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: false }
+      )
+      .setThumbnail(member.user.displayAvatarURL())
+      .setTimestamp();
+    
+    await logChannel.send({ embeds: [embed] });
+  }
+  
+  // Quitter un salon vocal
+  else if (oldState.channel && !newState.channel) {
+    const embed = new EmbedBuilder()
+      .setTitle('🔇 Utilisateur a quitté un salon vocal')
+      .setColor('#FF0000')
+      .addFields(
+        { name: '👤 Utilisateur', value: `${member.user} (${member.user.id})`, inline: true },
+        { name: '🔊 Salon', value: `${oldState.channel}`, inline: true },
+        { name: '📅 Date', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: false }
+      )
+      .setThumbnail(member.user.displayAvatarURL())
+      .setTimestamp();
+    
+    await logChannel.send({ embeds: [embed] });
+  }
+  
+  // Changer de salon vocal
+  else if (oldState.channel && newState.channel && oldState.channel.id !== newState.channel.id) {
+    const embed = new EmbedBuilder()
+      .setTitle('🔄 Utilisateur a changé de salon vocal')
+      .setColor('#FFA500')
+      .addFields(
+        { name: '👤 Utilisateur', value: `${member.user} (${member.user.id})`, inline: false },
+        { name: '🔊 Ancien salon', value: `${oldState.channel}`, inline: true },
+        { name: '🔊 Nouveau salon', value: `${newState.channel}`, inline: true },
+        { name: '📅 Date', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: false }
+      )
+      .setThumbnail(member.user.displayAvatarURL())
+      .setTimestamp();
+    
+    await logChannel.send({ embeds: [embed] });
+  }
+  
+  // Changements d'état (mute, deafen, stream, vidéo)
+  else if (oldState.channel && newState.channel && oldState.channel.id === newState.channel.id) {
+    const changes = [];
+    
+    // Mute/Unmute
+    if (oldState.selfMute !== newState.selfMute) {
+      changes.push(`${newState.selfMute ? '🔇 S\'est mis en muet' : '🔊 A activé son micro'}`);
+    }
+    if (oldState.serverMute !== newState.serverMute) {
+      changes.push(`${newState.serverMute ? '🔇 A été mis en muet par le serveur' : '🔊 N\'est plus muet par le serveur'}`);
+    }
+    
+    // Deafen/Undeafen
+    if (oldState.selfDeaf !== newState.selfDeaf) {
+      changes.push(`${newState.selfDeaf ? '🔇 S\'est sourdine' : '🔊 A activé son audio'}`);
+    }
+    if (oldState.serverDeaf !== newState.serverDeaf) {
+      changes.push(`${newState.serverDeaf ? '🔇 A été sourdine par le serveur' : '🔊 N\'est plus sourdine par le serveur'}`);
+    }
+    
+    // Stream
+    if (oldState.streaming !== newState.streaming) {
+      changes.push(`${newState.streaming ? '📡 A commencé à streamer' : '📡 A arrêté de streamer'}`);
+    }
+    
+    // Vidéo
+    if (oldState.selfVideo !== newState.selfVideo) {
+      changes.push(`${newState.selfVideo ? '📹 A activé sa caméra' : '📹 A désactivé sa caméra'}`);
+    }
+    
+    if (changes.length > 0) {
+      const embed = new EmbedBuilder()
+        .setTitle('⚙️ Changement d\'état vocal')
+        .setColor('#00BFFF')
+        .addFields(
+          { name: '👤 Utilisateur', value: `${member.user} (${member.user.id})`, inline: true },
+          { name: '🔊 Salon', value: `${newState.channel}`, inline: true },
+          { name: '🔄 Changements', value: changes.join('\n'), inline: false },
+          { name: '📅 Date', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: false }
+        )
+        .setThumbnail(member.user.displayAvatarURL())
+        .setTimestamp();
+      
+      await logChannel.send({ embeds: [embed] });
+    }
+  }
 });
 
 // Connexion du bot avec votre token
