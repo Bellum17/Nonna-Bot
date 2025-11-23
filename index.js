@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits, AuditLogEvent, ChannelType } = require('discord.js');
+const { Client, GatewayIntentBits, SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits, AuditLogEvent, ChannelType, Partials } = require('discord.js');
 
 // Créer un nouveau client Discord
 const client = new Client({
@@ -7,6 +7,11 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildModeration,
+  ],
+  partials: [
+    Partials.Message,
+    Partials.Channel,
+    Partials.Reaction,
   ]
 });
 
@@ -93,6 +98,17 @@ client.on('messageCreate', (message) => {
 
 // Logger les messages supprimés
 client.on('messageDelete', async (message) => {
+  // Si le message n'est pas dans le cache, essayer de le récupérer partiellement
+  if (message.partial) {
+    try {
+      await message.fetch();
+    } catch (error) {
+      console.log('Impossible de récupérer le message supprimé');
+    }
+  }
+
+  if (!message.guild) return; // Ignorer les DMs
+  
   const logChannelId = logChannels.get(message.guild.id);
   if (!logChannelId) return;
 
@@ -102,11 +118,17 @@ client.on('messageDelete', async (message) => {
   // Récupérer les infos du message depuis le cache
   const cachedMessage = messageCache.get(message.id) || {
     content: message.content || 'Contenu non disponible',
-    author: message.author,
+    author: message.author || { tag: 'Utilisateur inconnu', id: 'inconnu' },
     channel: message.channel,
     attachments: message.attachments ? Array.from(message.attachments.values()) : [],
-    createdAt: message.createdAt
+    createdAt: message.createdAt || new Date()
   };
+
+  // Si l'auteur n'est pas disponible, ne pas continuer
+  if (!cachedMessage.author || cachedMessage.author.id === 'inconnu') {
+    console.log('Auteur du message supprimé non trouvé');
+    return;
+  }
 
   // Vérifier qui a supprimé le message via les logs d'audit
   let deletedBy = null;
