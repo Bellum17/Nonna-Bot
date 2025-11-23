@@ -130,7 +130,7 @@ client.on('messageDelete', async (message) => {
     .setTitle('🗑️ Message supprimé')
     .setColor('#FF0000')
     .addFields(
-      { name: '👤 Auteur', value: `${cachedMessage.author.tag} (${cachedMessage.author.id})`, inline: true },
+      { name: '👤 Auteur', value: `${cachedMessage.author} (${cachedMessage.author.id})`, inline: true },
       { name: '📝 Canal', value: `${cachedMessage.channel}`, inline: true },
       { name: '📅 Date de création', value: `<t:${Math.floor(cachedMessage.createdAt.getTime() / 1000)}:F>`, inline: false }
     )
@@ -143,7 +143,7 @@ client.on('messageDelete', async (message) => {
 
   // Indiquer qui a supprimé le message
   if (deletedBy && deletedBy.id !== cachedMessage.author.id) {
-    embed.addFields({ name: '⚠️ Supprimé par', value: `${deletedBy.tag} (${deletedBy.id})` });
+    embed.addFields({ name: '⚠️ Supprimé par', value: `${deletedBy} (${deletedBy.id})` });
     embed.setColor('#FF6600');
   } else {
     embed.addFields({ name: 'ℹ️ Suppression', value: 'Message supprimé par son auteur' });
@@ -185,7 +185,7 @@ client.on('messageUpdate', async (oldMessage, newMessage) => {
     .setTitle('✏️ Message modifié')
     .setColor('#FFA500')
     .addFields(
-      { name: '👤 Auteur', value: `${newMessage.author.tag} (${newMessage.author.id})`, inline: true },
+      { name: '👤 Auteur', value: `${newMessage.author} (${newMessage.author.id})`, inline: true },
       { name: '📝 Canal', value: `${newMessage.channel}`, inline: true },
       { name: '🔗 Lien', value: `[Aller au message](${newMessage.url})`, inline: true },
       { name: '📜 Ancien contenu', value: oldMessage.content?.substring(0, 1024) || 'Aucun contenu' },
