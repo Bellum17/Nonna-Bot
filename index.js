@@ -20,21 +20,14 @@ const client = new Client({
 
 // Configuration PostgreSQL
 let pool = null;
-let useDatabase = false;
 
-// Initialiser PostgreSQL si DATABASE_URL existe
+// Initialiser PostgreSQL uniquement si DATABASE_URL existe
 if (process.env.DATABASE_URL) {
-  try {
-    pool = new Pool({
-      connectionString: process.env.DATABASE_URL,
-      ssl: { rejectUnauthorized: false }
-    });
-    useDatabase = true;
-    console.log('🗄️  PostgreSQL activé');
-  } catch (error) {
-    console.error('❌ Erreur PostgreSQL:', error.message);
-    useDatabase = false;
-  }
+  pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: { rejectUnauthorized: false }
+  });
+  console.log('🗄️  PostgreSQL configuré');
 }
 
 // Stocker les canaux de logs pour chaque serveur (cache en mémoire)
@@ -48,19 +41,11 @@ const logChannels = {
 // Stocker les messages pour détecter qui les a supprimés
 const messageCache = new Map();
 
-// Initialiser la base de données PostgreSQL
-async function initDatabase() {
-  if (!useDatabase || !pool) {
-    console.log('⚠️  Mode sans base de données - Configuration non persistante');
-    return;
-  }
-
+// Créer la table si elle n'existe pas
+async function ensureTableExists() {
+  if (!pool) return false;
+  
   try {
-    // Test de connexion
-    await pool.query('SELECT NOW()');
-    console.log('✅ Connexion PostgreSQL réussie');
-
-    // Créer la table de configuration des logs
     await pool.query(`
       CREATE TABLE IF NOT EXISTS log_config (
         guild_id VARCHAR(50) PRIMARY KEY,
@@ -72,22 +57,28 @@ async function initDatabase() {
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
-
-    console.log('✅ Table log_config créée/vérifiée');
+    return true;
   } catch (error) {
-    console.error('❌ Erreur initialisation base de données:', error.message);
-    useDatabase = false;
+    console.error('❌ Erreur création table:', error.message);
+    return false;
   }
 }
 
 // Charger la configuration depuis PostgreSQL
 async function loadConfig() {
-  if (!useDatabase || !pool) {
-    console.log('ℹ️  Aucune base de données - Configuration temporaire');
+  if (!pool) {
+    console.log('ℹ️  Pas de base de données configurée');
     return;
   }
 
   try {
+    // S'assurer que la table existe
+    const tableExists = await ensureTableExists();
+    if (!tableExists) {
+      console.log('⚠️  Impossible de créer la table');
+      return;
+    }
+
     const result = await pool.query('SELECT * FROM log_config');
     
     let count = 0;
@@ -110,46 +101,55 @@ async function loadConfig() {
       }
     });
 
-    console.log(`✅ Configuration chargée: ${count} logs configurés sur ${result.rows.length} serveurs`);
-    console.log(`📝 Messages: ${logChannels.messages.size} | 🎤 Vocaux: ${logChannels.voice.size} | 🎭 Rôles: ${logChannels.roles.size} | 📁 Salons: ${logChannels.channels.size}`);
+    console.log(`✅ Configuration chargée: ${count} logs sur ${result.rows.length} serveurs`);
   } catch (error) {
-    console.error('❌ Erreur chargement config:', error.message);
+    console.error('❌ Erreur chargement:', error.message);
   }
 }
 
 // Sauvegarder la configuration dans PostgreSQL
 async function saveConfig(guildId, logType, channelId) {
-  if (!useDatabase || !pool) {
-    console.log('⚠️  Pas de base de données - Configuration non sauvegardée');
-    return;
+  if (!pool) {
+    console.log('⚠️  Pas de BDD - Config non sauvegardée');
+    return false;
   }
 
   try {
-    // Vérifier si la guild existe
+    // Toujours s'assurer que la table existe avant de sauvegarder
+    const tableExists = await ensureTableExists();
+    if (!tableExists) {
+      console.log('❌ Table non créée');
+      return false;
+    }
+
+    const columnName = `log_${logType}`;
+    
+    // Vérifier si la guild existe déjà
     const checkResult = await pool.query(
       'SELECT * FROM log_config WHERE guild_id = $1',
       [guildId]
     );
 
-    const columnName = `log_${logType}`;
-    
     if (checkResult.rows.length > 0) {
       // Mise à jour
       await pool.query(
         `UPDATE log_config SET ${columnName} = $1, updated_at = CURRENT_TIMESTAMP WHERE guild_id = $2`,
         [channelId, guildId]
       );
-      console.log(`✅ Config mise à jour: ${logType} pour serveur ${guildId}`);
+      console.log(`✅ Config mise à jour: ${logType}`);
     } else {
       // Insertion
       await pool.query(
         `INSERT INTO log_config (guild_id, ${columnName}) VALUES ($1, $2)`,
         [guildId, channelId]
       );
-      console.log(`✅ Config créée: ${logType} pour serveur ${guildId}`);
+      console.log(`✅ Config créée: ${logType}`);
     }
+    
+    return true;
   } catch (error) {
-    console.error('❌ Erreur sauvegarde config:', error.message);
+    console.error('❌ Erreur sauvegarde:', error.message);
+    return false;
   }
 }
 
@@ -157,9 +157,13 @@ async function saveConfig(guildId, logType, channelId) {
 client.once('clientReady', async () => {
   console.log(`✅ Bot connecté en tant que ${client.user.tag}`);
   
-  // Initialiser et charger la configuration
-  await initDatabase();
-  await loadConfig();
+  // Charger la configuration si PostgreSQL est disponible
+  if (pool) {
+    console.log('🔄 Chargement de la configuration...');
+    await loadConfig();
+  } else {
+    console.log('⚠️  Mode sans base de données - Config temporaire');
+  }
   
   // Enregistrer les commandes slash
   const commands = [
@@ -239,36 +243,36 @@ client.on('interactionCreate', async (interaction) => {
     
     if (subcommand === 'messages') {
       logChannels.messages.set(interaction.guildId, channel.id);
-      await saveConfig(interaction.guildId, 'messages', channel.id);
+      const saved = await saveConfig(interaction.guildId, 'messages', channel.id);
       await interaction.reply({
-        content: `✅ Les logs de messages seront envoyés dans ${channel}\n💾 Configuration ${useDatabase ? 'sauvegardée en base de données' : 'temporaire (pas de BDD)'}!`,
+        content: `✅ Les logs de messages seront envoyés dans ${channel}\n${saved ? '💾 Configuration sauvegardée en BDD!' : '⚠️ Config temporaire (pas de BDD)'}`,
         ephemeral: true
       });
     }
     
     if (subcommand === 'vocal') {
       logChannels.voice.set(interaction.guildId, channel.id);
-      await saveConfig(interaction.guildId, 'voice', channel.id);
+      const saved = await saveConfig(interaction.guildId, 'voice', channel.id);
       await interaction.reply({
-        content: `✅ Les logs vocaux seront envoyés dans ${channel}\n💾 Configuration ${useDatabase ? 'sauvegardée en base de données' : 'temporaire (pas de BDD)'}!`,
+        content: `✅ Les logs vocaux seront envoyés dans ${channel}\n${saved ? '💾 Configuration sauvegardée en BDD!' : '⚠️ Config temporaire (pas de BDD)'}`,
         ephemeral: true
       });
     }
     
     if (subcommand === 'roles') {
       logChannels.roles.set(interaction.guildId, channel.id);
-      await saveConfig(interaction.guildId, 'roles', channel.id);
+      const saved = await saveConfig(interaction.guildId, 'roles', channel.id);
       await interaction.reply({
-        content: `✅ Les logs de rôles seront envoyés dans ${channel}\n💾 Configuration ${useDatabase ? 'sauvegardée en base de données' : 'temporaire (pas de BDD)'}!`,
+        content: `✅ Les logs de rôles seront envoyés dans ${channel}\n${saved ? '💾 Configuration sauvegardée en BDD!' : '⚠️ Config temporaire (pas de BDD)'}`,
         ephemeral: true
       });
     }
     
     if (subcommand === 'salons') {
       logChannels.channels.set(interaction.guildId, channel.id);
-      await saveConfig(interaction.guildId, 'channels', channel.id);
+      const saved = await saveConfig(interaction.guildId, 'channels', channel.id);
       await interaction.reply({
-        content: `✅ Les logs de salons seront envoyés dans ${channel}\n💾 Configuration ${useDatabase ? 'sauvegardée en base de données' : 'temporaire (pas de BDD)'}!`,
+        content: `✅ Les logs de salons seront envoyés dans ${channel}\n${saved ? '💾 Configuration sauvegardée en BDD!' : '⚠️ Config temporaire (pas de BDD)'}`,
         ephemeral: true
       });
     }
