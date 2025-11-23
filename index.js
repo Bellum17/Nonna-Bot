@@ -79,6 +79,7 @@ async function ensureTableExists() {
   if (!pool) return false;
   
   try {
+    // Créer la table de base
     await pool.query(`
       CREATE TABLE IF NOT EXISTS log_config (
         guild_id VARCHAR(50) PRIMARY KEY,
@@ -91,6 +92,26 @@ async function ensureTableExists() {
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    
+    // Vérifier et ajouter les colonnes manquantes (migration)
+    try {
+      const columnsCheck = await pool.query(`
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_name = 'log_config'
+      `);
+      
+      const existingColumns = columnsCheck.rows.map(row => row.column_name);
+      
+      // Ajouter log_members si elle n'existe pas
+      if (!existingColumns.includes('log_members')) {
+        await pool.query(`ALTER TABLE log_config ADD COLUMN log_members VARCHAR(50)`);
+        console.log('✅ Colonne log_members ajoutée');
+      }
+    } catch (migrationError) {
+      console.log('⚠️  Migration déjà effectuée ou erreur:', migrationError.message);
+    }
+    
     return true;
   } catch (error) {
     console.error('❌ Erreur création table:', error.message);
@@ -296,7 +317,7 @@ client.on('interactionCreate', async (interaction) => {
       const saved = await saveConfig(interaction.guildId, 'messages', channel.id);
       await interaction.reply({
         content: `✅ Les logs de messages seront envoyés dans ${channel}\n${saved ? '💾 Configuration sauvegardée en BDD!' : '⚠️ Config temporaire (pas de BDD)'}`,
-        ephemeral: true
+        flags: 64 // MessageFlags.Ephemeral
       });
     }
     
@@ -305,7 +326,7 @@ client.on('interactionCreate', async (interaction) => {
       const saved = await saveConfig(interaction.guildId, 'voice', channel.id);
       await interaction.reply({
         content: `✅ Les logs vocaux seront envoyés dans ${channel}\n${saved ? '💾 Configuration sauvegardée en BDD!' : '⚠️ Config temporaire (pas de BDD)'}`,
-        ephemeral: true
+        flags: 64 // MessageFlags.Ephemeral
       });
     }
     
@@ -314,7 +335,7 @@ client.on('interactionCreate', async (interaction) => {
       const saved = await saveConfig(interaction.guildId, 'roles', channel.id);
       await interaction.reply({
         content: `✅ Les logs de rôles seront envoyés dans ${channel}\n${saved ? '💾 Configuration sauvegardée en BDD!' : '⚠️ Config temporaire (pas de BDD)'}`,
-        ephemeral: true
+        flags: 64 // MessageFlags.Ephemeral
       });
     }
     
@@ -323,7 +344,7 @@ client.on('interactionCreate', async (interaction) => {
       const saved = await saveConfig(interaction.guildId, 'channels', channel.id);
       await interaction.reply({
         content: `✅ Les logs de salons seront envoyés dans ${channel}\n${saved ? '💾 Configuration sauvegardée en BDD!' : '⚠️ Config temporaire (pas de BDD)'}`,
-        ephemeral: true
+        flags: 64 // MessageFlags.Ephemeral
       });
     }
     
@@ -332,7 +353,7 @@ client.on('interactionCreate', async (interaction) => {
       const saved = await saveConfig(interaction.guildId, 'members', channel.id);
       await interaction.reply({
         content: `✅ Les logs de membres seront envoyés dans ${channel}\n${saved ? '💾 Configuration sauvegardée en BDD!' : '⚠️ Config temporaire (pas de BDD)'}`,
-        ephemeral: true
+        flags: 64 // MessageFlags.Ephemeral
       });
     }
   }
