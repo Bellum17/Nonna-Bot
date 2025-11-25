@@ -353,6 +353,17 @@ client.once('clientReady', async () => {
               .setRequired(true)
           )
       )
+      .addSubcommand(subcommand =>
+        subcommand
+          .setName('permission')
+          .setDescription('Définit quel rôle a accès aux tickets créés')
+          .addRoleOption(option =>
+            option
+              .setName('role')
+              .setDescription('Le rôle qui aura accès aux tickets (staff/support)')
+              .setRequired(true)
+          )
+      )
       .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
   ];
 
@@ -535,6 +546,22 @@ client.on('interactionCreate', async (interaction) => {
         setupChannelId: channel.id
       });
     }
+    
+    if (subcommand === 'permission') {
+      const role = interaction.options.getRole('role');
+      
+      // Initialiser la config si elle n'existe pas
+      if (!client.ticketConfig) client.ticketConfig = new Map();
+      
+      const config = client.ticketConfig.get(interaction.guildId) || {};
+      config.supportRoleId = role.id;
+      client.ticketConfig.set(interaction.guildId, config);
+      
+      await interaction.reply({
+        content: `✅ Le rôle ${role} a été défini comme rôle de support.\nCe rôle aura accès à tous les tickets créés.`,
+        flags: 64
+      });
+    }
   }
   
   // Gestion des boutons
@@ -624,7 +651,7 @@ client.on('interactionCreate', async (interaction) => {
     if (interaction.customId === 'ticket_type_direct') {
       const ticketType = interaction.values[0];
       
-      // Si c'est "Autre", demander une raison
+      // Si c'est "Autre", demander une raison via modal
       if (ticketType === 'autre') {
         const modal = new ModalBuilder()
           .setCustomId('ticket_autre_modal')
@@ -643,8 +670,19 @@ client.on('interactionCreate', async (interaction) => {
         
         await interaction.showModal(modal);
       } else {
-        // Créer le ticket directement
-        await createTicket(interaction, ticketType, null);
+        // Différer la réponse pour avoir le temps de créer le ticket
+        await interaction.deferReply({ flags: 64 });
+        
+        try {
+          // Créer le ticket directement
+          await createTicket(interaction, ticketType, null);
+        } catch (error) {
+          console.error('Erreur lors de la création du ticket:', error);
+          await interaction.editReply({
+            content: '❌ Une erreur est survenue lors de la création du ticket.',
+            flags: 64
+          });
+        }
       }
     }
   }
@@ -652,16 +690,24 @@ client.on('interactionCreate', async (interaction) => {
   // Gestion des modals
   if (interaction.isModalSubmit()) {
     if (interaction.customId === 'ticket_autre_modal') {
-      const raison = interaction.fields.getTextInputValue('raison_ticket');
-      await createTicket(interaction, 'autre', raison);
+      await interaction.deferReply({ flags: 64 });
+      
+      try {
+        const raison = interaction.fields.getTextInputValue('raison_ticket');
+        await createTicket(interaction, 'autre', raison);
+      } catch (error) {
+        console.error('Erreur lors de la création du ticket:', error);
+        await interaction.editReply({
+          content: '❌ Une erreur est survenue lors de la création du ticket.',
+          flags: 64
+        });
+      }
     }
   }
 });
 
 // Fonction pour créer un ticket
 async function createTicket(interaction, type, raison = null) {
-  const { PermissionFlagsBits, ChannelType, ButtonBuilder, ButtonStyle, ActionRowBuilder } = require('discord.js');
-  
   const config = client.ticketConfig?.get(interaction.guildId);
   if (!config) {
     return await interaction.reply({
@@ -688,55 +734,78 @@ async function createTicket(interaction, type, raison = null) {
     autre: '#5865F2'
   };
   
+  const typeDescriptions = {
+    helper: 'Merci d\'avoir ouvert un ticket d\'aide ! Un membre du staff va vous assister rapidement.\n\n**Conseils :**\n• Expliquez votre problème de manière détaillée\n• Ajoutez des captures d\'écran si nécessaire\n• Soyez patient, nous répondons dès que possible',
+    plaintes: 'Merci d\'avoir ouvert un ticket de plainte. Nous prenons votre retour au sérieux.\n\n**Informations importantes :**\n• Décrivez la situation avec précision\n• Fournissez des preuves si possible\n• Restez respectueux dans vos propos',
+    autre: 'Merci d\'avoir ouvert un ticket ! Un membre du staff va examiner votre demande.\n\n**À savoir :**\n• Votre demande sera traitée dans les meilleurs délais\n• N\'hésitez pas à fournir tous les détails nécessaires'
+  };
+  
+  // Préparer les permissions de base
+  const permissionOverwrites = [
+    {
+      id: interaction.guild.id,
+      deny: [PermissionFlagsBits.ViewChannel]
+    },
+    {
+      id: interaction.user.id,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.ReadMessageHistory,
+        PermissionFlagsBits.AttachFiles,
+        PermissionFlagsBits.EmbedLinks
+      ]
+    },
+    {
+      id: interaction.client.user.id,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.ManageChannels
+      ]
+    }
+  ];
+  
+  // Ajouter le rôle autorisé s'il existe
+  if (config.supportRoleId) {
+    permissionOverwrites.push({
+      id: config.supportRoleId,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.ReadMessageHistory,
+        PermissionFlagsBits.AttachFiles,
+        PermissionFlagsBits.EmbedLinks
+      ]
+    });
+  }
+  
   // Créer le salon de ticket
   const ticketChannel = await interaction.guild.channels.create({
-    name: `ticket-${interaction.user.username}`,
+    name: `${typeEmojis[type]}-${interaction.user.username}`,
     type: ChannelType.GuildText,
     parent: config.categoryId,
-    permissionOverwrites: [
-      {
-        id: interaction.guild.id,
-        deny: [PermissionFlagsBits.ViewChannel]
-      },
-      {
-        id: interaction.user.id,
-        allow: [
-          PermissionFlagsBits.ViewChannel,
-          PermissionFlagsBits.SendMessages,
-          PermissionFlagsBits.ReadMessageHistory,
-          PermissionFlagsBits.AttachFiles,
-          PermissionFlagsBits.EmbedLinks
-        ]
-      },
-      {
-        id: interaction.client.user.id,
-        allow: [
-          PermissionFlagsBits.ViewChannel,
-          PermissionFlagsBits.SendMessages,
-          PermissionFlagsBits.ManageChannels
-        ]
-      }
-    ]
+    permissionOverwrites: permissionOverwrites
   });
   
-  // Créer l'embed du ticket
+  // Créer l'embed du ticket avec message personnalisé selon le type
   const ticketEmbed = new EmbedBuilder()
     .setTitle(`${typeEmojis[type]} Ticket - ${typeNames[type]}`)
-    .setDescription(`Bonjour ${interaction.user} !\n\nMerci d'avoir ouvert un ticket. Un membre du staff va vous répondre sous peu.`)
+    .setDescription(
+      `Bonjour ${interaction.user} !\n\n` +
+      typeDescriptions[type] +
+      (raison ? `\n\n**📝 Votre demande :**\n${raison}` : '')
+    )
     .setColor(typeColors[type])
     .addFields(
       { name: '👤 Créé par', value: `${interaction.user.tag}`, inline: true },
       { name: '📋 Type', value: typeNames[type], inline: true },
       { name: '📅 Date', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: false }
     )
-    .setFooter({ text: 'Utilisez le bouton ci-dessous pour fermer le ticket' })
+    .setFooter({ text: 'Utilisez le bouton rouge ci-dessous pour fermer le ticket' })
     .setTimestamp();
   
-  if (raison) {
-    ticketEmbed.addFields({ name: '📝 Raison', value: raison, inline: false });
-  }
-  
-  // Bouton pour fermer le ticket
+  // Bouton pour fermer le ticket (rouge)
   const closeButton = new ButtonBuilder()
     .setCustomId('close_ticket')
     .setLabel('Fermer le Ticket')
@@ -746,16 +815,25 @@ async function createTicket(interaction, type, raison = null) {
   const row = new ActionRowBuilder()
     .addComponents(closeButton);
   
+  // Mentionner l'utilisateur et le rôle support s'il existe
   await ticketChannel.send({
-    content: `${interaction.user}`,
+    content: `${interaction.user}${config.supportRoleId ? ` - <@&${config.supportRoleId}>` : ''}`,
     embeds: [ticketEmbed],
     components: [row]
   });
   
-  await interaction.reply({
-    content: `✅ Votre ticket a été créé : ${ticketChannel}`,
-    flags: 64
-  });
+  // Vérifier si l'interaction a déjà été différée ou répondue
+  if (interaction.deferred) {
+    await interaction.editReply({
+      content: `✅ Votre ticket a été créé : ${ticketChannel}`,
+      flags: 64
+    });
+  } else if (!interaction.replied) {
+    await interaction.reply({
+      content: `✅ Votre ticket a été créé : ${ticketChannel}`,
+      flags: 64
+    });
+  }
 }
 
 // Événement pour répondre aux messages
