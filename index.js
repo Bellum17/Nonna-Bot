@@ -478,28 +478,44 @@ client.on('interactionCreate', async (interaction) => {
       // Créer l'embed du message de tickets
       const ticketEmbed = new EmbedBuilder()
         .setTitle('🎫 Système de Tickets')
-        .setDescription('Besoin d\'aide ou d\'assistance ? Créez un ticket en cliquant sur le bouton ci-dessous et sélectionnez le type de votre demande.')
+        .setDescription('Besoin d\'aide ou d\'assistance ? Créez un ticket en sélectionnant le type de votre demande dans le menu ci-dessous.')
         .setColor('#5865F2')
         .addFields(
           { name: '🆘 Helper', value: 'Pour toute demande d\'aide générale', inline: true },
           { name: '⚠️ Plaintes', value: 'Pour signaler un problème ou une plainte', inline: true },
           { name: '📝 Autre(s)', value: 'Pour toute autre demande spécifique', inline: true },
-          { name: '\u200B', value: '**Comment ça marche ?**\n1️⃣ Cliquez sur "Créer un Ticket"\n2️⃣ Sélectionnez le type de ticket\n3️⃣ Un salon privé sera créé pour vous', inline: false }
+          { name: '\u200B', value: '**Comment ça marche ?**\n1️⃣ Sélectionnez le type de ticket dans le menu\n2️⃣ Un salon privé sera créé pour vous\n3️⃣ Expliquez votre demande', inline: false }
         )
         .setFooter({ text: 'Temps de réponse moyen : < 24h' })
         .setTimestamp();
       
-      // Créer le bouton
-      const { ButtonBuilder, ButtonStyle, ActionRowBuilder } = require('discord.js');
-      
-      const button = new ButtonBuilder()
-        .setCustomId('create_ticket')
-        .setLabel('Créer un Ticket')
-        .setEmoji('🎫')
-        .setStyle(ButtonStyle.Primary);
+      // Créer le menu déroulant directement
+      const selectMenu = new StringSelectMenuBuilder()
+        .setCustomId('ticket_type_direct')
+        .setPlaceholder('📋 Sélectionnez le type de ticket')
+        .addOptions([
+          {
+            label: 'Helper',
+            description: 'Demande d\'aide générale',
+            value: 'helper',
+            emoji: '🆘'
+          },
+          {
+            label: 'Plaintes',
+            description: 'Signaler un problème ou une plainte',
+            value: 'plaintes',
+            emoji: '⚠️'
+          },
+          {
+            label: 'Autre(s)',
+            description: 'Autre demande spécifique',
+            value: 'autre',
+            emoji: '📝'
+          }
+        ]);
       
       const row = new ActionRowBuilder()
-        .addComponents(button);
+        .addComponents(selectMenu);
       
       // Envoyer le message dans le salon spécifié
       await channel.send({ 
@@ -576,13 +592,40 @@ client.on('interactionCreate', async (interaction) => {
   
   // Gestion des menus déroulants
   if (interaction.isStringSelectMenu()) {
+    // Ancien menu (depuis le bouton - on le garde pour compatibilité)
     if (interaction.customId === 'ticket_type') {
       const ticketType = interaction.values[0];
       
       // Si c'est "Autre", demander une raison
       if (ticketType === 'autre') {
-        const { ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder } = require('discord.js');
+        const modal = new ModalBuilder()
+          .setCustomId('ticket_autre_modal')
+          .setTitle('Précisez votre demande');
         
+        const raisonInput = new TextInputBuilder()
+          .setCustomId('raison_ticket')
+          .setLabel('Quel est le sujet de votre ticket ?')
+          .setStyle(TextInputStyle.Paragraph)
+          .setPlaceholder('Décrivez brièvement votre demande...')
+          .setRequired(true)
+          .setMaxLength(500);
+        
+        const row = new ActionRowBuilder().addComponents(raisonInput);
+        modal.addComponents(row);
+        
+        await interaction.showModal(modal);
+      } else {
+        // Créer le ticket directement
+        await createTicket(interaction, ticketType, null);
+      }
+    }
+    
+    // Nouveau menu direct (dans le message principal)
+    if (interaction.customId === 'ticket_type_direct') {
+      const ticketType = interaction.values[0];
+      
+      // Si c'est "Autre", demander une raison
+      if (ticketType === 'autre') {
         const modal = new ModalBuilder()
           .setCustomId('ticket_autre_modal')
           .setTitle('Précisez votre demande');
