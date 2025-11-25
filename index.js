@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits, AuditLogEvent, ChannelType, Partials } = require('discord.js');
+const { Client, GatewayIntentBits, SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits, AuditLogEvent, ChannelType, Partials, ButtonBuilder, ButtonStyle, ActionRowBuilder, StringSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle } = require('discord.js');
 const { Pool } = require('pg');
 
 // Créer un nouveau client Discord
@@ -329,6 +329,30 @@ client.once('clientReady', async () => {
               .setRequired(true)
           )
       )
+      .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+    
+    new SlashCommandBuilder()
+      .setName('ticket')
+      .setDescription('Gestion du système de tickets')
+      .addSubcommand(subcommand =>
+        subcommand
+          .setName('setup')
+          .setDescription('Configure le système de tickets')
+          .addChannelOption(option =>
+            option
+              .setName('salon')
+              .setDescription('Le salon où afficher le message de création de tickets')
+              .addChannelTypes(ChannelType.GuildText)
+              .setRequired(true)
+          )
+          .addChannelOption(option =>
+            option
+              .setName('categorie')
+              .setDescription('La catégorie où créer les tickets')
+              .addChannelTypes(ChannelType.GuildCategory)
+              .setRequired(true)
+          )
+      )
       .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
   ];
 
@@ -406,6 +430,22 @@ client.on('interactionCreate', async (interaction) => {
         const invites = await interaction.guild.invites.fetch();
         invitesCache.set(interaction.guildId, new Map(invites.map(invite => [invite.code, invite.uses])));
         
+        // Envoyer un embed dans le salon configuré
+        const setupEmbed = new EmbedBuilder()
+          .setTitle('🎟️ Système d\'Invitations Configuré')
+          .setDescription('Le système de suivi des invitations est maintenant actif dans ce salon !')
+          .setColor('#00FF00')
+          .addFields(
+            { name: '📥 Logs activés', value: '• Création d\'invitations\n• Utilisation d\'invitations\n• Suppression d\'invitations\n• Membres rejoignant le serveur\n• Membres quittant le serveur', inline: false },
+            { name: '📊 Statistiques', value: `${invites.size} invitations actuellement actives`, inline: true },
+            { name: '✅ Configuration', value: saved ? 'Sauvegardée en base de données' : 'Temporaire (session)', inline: true },
+            { name: '📋 Informations suivies', value: '• Qui a invité qui\n• Nombre total d\'invitations par lien\n• Décompte des départs (-1 membre)\n• Raisons des départs (quit/kick/ban)', inline: false }
+          )
+          .setFooter({ text: `Configuré par ${interaction.user.tag}` })
+          .setTimestamp();
+        
+        await channel.send({ embeds: [setupEmbed] });
+        
         await interaction.reply({
           content: `✅ Les logs d'invitations seront envoyés dans ${channel}\n${saved ? '💾 Configuration sauvegardée en BDD!' : '⚠️ Config temporaire (pas de BDD)'}\n📊 ${invites.size} invitations actuellement actives`,
           flags: 64 // MessageFlags.Ephemeral
@@ -418,7 +458,262 @@ client.on('interactionCreate', async (interaction) => {
       }
     }
   }
+  
+  // Commande /ticket
+  if (interaction.commandName === 'ticket') {
+    const subcommand = interaction.options.getSubcommand();
+    
+    if (subcommand === 'setup') {
+      const channel = interaction.options.getChannel('salon');
+      const category = interaction.options.getChannel('categorie');
+      
+      // Vérifier que c'est bien une catégorie
+      if (category.type !== 4) {
+        return await interaction.reply({
+          content: '❌ Vous devez sélectionner une **catégorie** (pas un salon textuel ou vocal)',
+          flags: 64
+        });
+      }
+      
+      // Créer l'embed du message de tickets
+      const ticketEmbed = new EmbedBuilder()
+        .setTitle('🎫 Système de Tickets')
+        .setDescription('Besoin d\'aide ou d\'assistance ? Créez un ticket en cliquant sur le bouton ci-dessous et sélectionnez le type de votre demande.')
+        .setColor('#5865F2')
+        .addFields(
+          { name: '🆘 Helper', value: 'Pour toute demande d\'aide générale', inline: true },
+          { name: '⚠️ Plaintes', value: 'Pour signaler un problème ou une plainte', inline: true },
+          { name: '📝 Autre(s)', value: 'Pour toute autre demande spécifique', inline: true },
+          { name: '\u200B', value: '**Comment ça marche ?**\n1️⃣ Cliquez sur "Créer un Ticket"\n2️⃣ Sélectionnez le type de ticket\n3️⃣ Un salon privé sera créé pour vous', inline: false }
+        )
+        .setFooter({ text: 'Temps de réponse moyen : < 24h' })
+        .setTimestamp();
+      
+      // Créer le bouton
+      const { ButtonBuilder, ButtonStyle, ActionRowBuilder } = require('discord.js');
+      
+      const button = new ButtonBuilder()
+        .setCustomId('create_ticket')
+        .setLabel('Créer un Ticket')
+        .setEmoji('🎫')
+        .setStyle(ButtonStyle.Primary);
+      
+      const row = new ActionRowBuilder()
+        .addComponents(button);
+      
+      // Envoyer le message dans le salon spécifié
+      await channel.send({ 
+        embeds: [ticketEmbed],
+        components: [row]
+      });
+      
+      await interaction.reply({
+        content: `✅ Le système de tickets a été configuré dans ${channel}\n📁 Catégorie des tickets : ${category}`,
+        flags: 64
+      });
+      
+      // Sauvegarder la configuration (temporaire pour l'instant)
+      if (!client.ticketConfig) client.ticketConfig = new Map();
+      client.ticketConfig.set(interaction.guildId, {
+        categoryId: category.id,
+        setupChannelId: channel.id
+      });
+    }
+  }
+  
+  // Gestion des boutons
+  if (interaction.isButton()) {
+    if (interaction.customId === 'create_ticket') {
+      const { StringSelectMenuBuilder, ActionRowBuilder } = require('discord.js');
+      
+      // Créer le menu déroulant pour sélectionner le type de ticket
+      const selectMenu = new StringSelectMenuBuilder()
+        .setCustomId('ticket_type')
+        .setPlaceholder('Sélectionnez le type de ticket')
+        .addOptions([
+          {
+            label: 'Helper',
+            description: 'Demande d\'aide générale',
+            value: 'helper',
+            emoji: '🆘'
+          },
+          {
+            label: 'Plaintes',
+            description: 'Signaler un problème ou une plainte',
+            value: 'plaintes',
+            emoji: '⚠️'
+          },
+          {
+            label: 'Autre(s)',
+            description: 'Autre demande spécifique',
+            value: 'autre',
+            emoji: '📝'
+          }
+        ]);
+      
+      const row = new ActionRowBuilder()
+        .addComponents(selectMenu);
+      
+      await interaction.reply({
+        content: '🎫 **Création de Ticket**\n\nVeuillez sélectionner le type de votre demande ci-dessous :',
+        components: [row],
+        flags: 64
+      });
+    }
+    
+    if (interaction.customId === 'close_ticket') {
+      // Fermer le ticket
+      await interaction.reply({
+        content: '🔒 Fermeture du ticket dans 5 secondes...',
+        flags: 64
+      });
+      
+      setTimeout(async () => {
+        await interaction.channel.delete();
+      }, 5000);
+    }
+  }
+  
+  // Gestion des menus déroulants
+  if (interaction.isStringSelectMenu()) {
+    if (interaction.customId === 'ticket_type') {
+      const ticketType = interaction.values[0];
+      
+      // Si c'est "Autre", demander une raison
+      if (ticketType === 'autre') {
+        const { ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder } = require('discord.js');
+        
+        const modal = new ModalBuilder()
+          .setCustomId('ticket_autre_modal')
+          .setTitle('Précisez votre demande');
+        
+        const raisonInput = new TextInputBuilder()
+          .setCustomId('raison_ticket')
+          .setLabel('Quel est le sujet de votre ticket ?')
+          .setStyle(TextInputStyle.Paragraph)
+          .setPlaceholder('Décrivez brièvement votre demande...')
+          .setRequired(true)
+          .setMaxLength(500);
+        
+        const row = new ActionRowBuilder().addComponents(raisonInput);
+        modal.addComponents(row);
+        
+        await interaction.showModal(modal);
+      } else {
+        // Créer le ticket directement
+        await createTicket(interaction, ticketType, null);
+      }
+    }
+  }
+  
+  // Gestion des modals
+  if (interaction.isModalSubmit()) {
+    if (interaction.customId === 'ticket_autre_modal') {
+      const raison = interaction.fields.getTextInputValue('raison_ticket');
+      await createTicket(interaction, 'autre', raison);
+    }
+  }
 });
+
+// Fonction pour créer un ticket
+async function createTicket(interaction, type, raison = null) {
+  const { PermissionFlagsBits, ChannelType, ButtonBuilder, ButtonStyle, ActionRowBuilder } = require('discord.js');
+  
+  const config = client.ticketConfig?.get(interaction.guildId);
+  if (!config) {
+    return await interaction.reply({
+      content: '❌ Le système de tickets n\'est pas configuré sur ce serveur.',
+      flags: 64
+    });
+  }
+  
+  const typeEmojis = {
+    helper: '🆘',
+    plaintes: '⚠️',
+    autre: '📝'
+  };
+  
+  const typeNames = {
+    helper: 'Helper',
+    plaintes: 'Plaintes',
+    autre: 'Autre'
+  };
+  
+  const typeColors = {
+    helper: '#00FF00',
+    plaintes: '#FF6600',
+    autre: '#5865F2'
+  };
+  
+  // Créer le salon de ticket
+  const ticketChannel = await interaction.guild.channels.create({
+    name: `ticket-${interaction.user.username}`,
+    type: ChannelType.GuildText,
+    parent: config.categoryId,
+    permissionOverwrites: [
+      {
+        id: interaction.guild.id,
+        deny: [PermissionFlagsBits.ViewChannel]
+      },
+      {
+        id: interaction.user.id,
+        allow: [
+          PermissionFlagsBits.ViewChannel,
+          PermissionFlagsBits.SendMessages,
+          PermissionFlagsBits.ReadMessageHistory,
+          PermissionFlagsBits.AttachFiles,
+          PermissionFlagsBits.EmbedLinks
+        ]
+      },
+      {
+        id: interaction.client.user.id,
+        allow: [
+          PermissionFlagsBits.ViewChannel,
+          PermissionFlagsBits.SendMessages,
+          PermissionFlagsBits.ManageChannels
+        ]
+      }
+    ]
+  });
+  
+  // Créer l'embed du ticket
+  const ticketEmbed = new EmbedBuilder()
+    .setTitle(`${typeEmojis[type]} Ticket - ${typeNames[type]}`)
+    .setDescription(`Bonjour ${interaction.user} !\n\nMerci d'avoir ouvert un ticket. Un membre du staff va vous répondre sous peu.`)
+    .setColor(typeColors[type])
+    .addFields(
+      { name: '👤 Créé par', value: `${interaction.user.tag}`, inline: true },
+      { name: '📋 Type', value: typeNames[type], inline: true },
+      { name: '📅 Date', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: false }
+    )
+    .setFooter({ text: 'Utilisez le bouton ci-dessous pour fermer le ticket' })
+    .setTimestamp();
+  
+  if (raison) {
+    ticketEmbed.addFields({ name: '📝 Raison', value: raison, inline: false });
+  }
+  
+  // Bouton pour fermer le ticket
+  const closeButton = new ButtonBuilder()
+    .setCustomId('close_ticket')
+    .setLabel('Fermer le Ticket')
+    .setEmoji('🔒')
+    .setStyle(ButtonStyle.Danger);
+  
+  const row = new ActionRowBuilder()
+    .addComponents(closeButton);
+  
+  await ticketChannel.send({
+    content: `${interaction.user}`,
+    embeds: [ticketEmbed],
+    components: [row]
+  });
+  
+  await interaction.reply({
+    content: `✅ Votre ticket a été créé : ${ticketChannel}`,
+    flags: 64
+  });
+}
 
 // Événement pour répondre aux messages
 client.on('messageCreate', (message) => {
@@ -1422,6 +1717,32 @@ client.on('guildMemberRemove', async (member) => {
   }
   
   await logChannel.send({ embeds: [embed] });
+  
+  // Log dans le salon des invitations (décompte)
+  const inviteLogChannelId = logChannels.invites.get(member.guild.id);
+  if (inviteLogChannelId) {
+    const inviteLogChannel = member.guild.channels.cache.get(inviteLogChannelId);
+    if (inviteLogChannel) {
+      const inviteEmbed = new EmbedBuilder()
+        .setTitle('📉 Membre a quitté le serveur')
+        .setColor(color)
+        .setThumbnail(member.user.displayAvatarURL({ size: 512 }))
+        .addFields(
+          { name: '👤 Membre', value: `${member.user} (${member.user.tag})`, inline: false },
+          { name: '📊 Action', value: action === 'quitté' ? '🚪 A quitté' : action === 'banni' ? '🔨 Banni' : '👢 Expulsé', inline: true },
+          { name: '⏰ Temps sur le serveur', value: `${timeOnServer} jours`, inline: true },
+          { name: '📉 Compteur', value: `-1 membre`, inline: false },
+          { name: '📅 Date', value: `<t:${Math.floor(Date.now() / 1000)}:F>` }
+        )
+        .setTimestamp();
+      
+      if (executor) {
+        inviteEmbed.addFields({ name: action === 'banni' ? '🔨 Banni par' : '👢 Expulsé par', value: `${executor}` });
+      }
+      
+      await inviteLogChannel.send({ embeds: [inviteEmbed] });
+    }
+  }
 });
 
 // Logger les mises à jour des membres
